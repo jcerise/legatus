@@ -28,7 +28,7 @@ class MemoryBridge:
             if project_memories:
                 lines = [m.get("memory", str(m)) for m in project_memories]
                 sections.append(
-                    "## Project Context\n" + "\n".join(f"- {line}" for line in lines)
+                    "### Project Context\n" + "\n".join(f"- {line}" for line in lines)
                 )
         except Exception:
             logger.debug("No project memories found", exc_info=True)
@@ -43,7 +43,7 @@ class MemoryBridge:
             if global_memories:
                 lines = [m.get("memory", str(m)) for m in global_memories]
                 sections.append(
-                    "## User Preferences\n" + "\n".join(f"- {line}" for line in lines)
+                    "### User Preferences\n" + "\n".join(f"- {line}" for line in lines)
                 )
         except Exception:
             logger.debug("No global memories found", exc_info=True)
@@ -51,19 +51,61 @@ class MemoryBridge:
         return "\n\n".join(sections)
 
     async def extract_learnings(self, task: Task, result: dict) -> None:
-        """After task completion, save key learnings to Mem0 project memory."""
+        """After task completion, parse structured learnings and store them."""
         output = result.get("output", "")
         if not output:
             return
 
-        try:
-            summary = f"Completed task '{task.title}': {output[:500]}"
-            ns = MemoryNamespace.project(self.project_id)
-            await self.mem0.add(
-                summary,
-                **ns,
+        learnings = self._parse_learnings(output)
+
+        # Store project-level memory
+        project_ns = MemoryNamespace.project(self.project_id)
+        if learnings:
+            await self._store(
+                f"Task '{task.title}' learnings:\n{learnings}",
+                namespace=project_ns,
+                metadata={"task_id": task.id, "type": "learnings"},
+            )
+        else:
+            # Fallback: store a truncated summary if no structured section found
+            await self._store(
+                f"Completed task '{task.title}': {output[:500]}",
+                namespace=project_ns,
                 metadata={"task_id": task.id, "type": "task_completion"},
             )
-            logger.info("Extracted memories for task %s", task.id)
+
+        # Store general patterns under global namespace
+        if learnings:
+            global_ns = MemoryNamespace.global_user()
+            await self._store(
+                f"Patterns from '{task.title}':\n{learnings}",
+                namespace=global_ns,
+                metadata={"task_id": task.id, "type": "patterns"},
+            )
+
+        logger.info("Extracted memories for task %s", task.id)
+
+    @staticmethod
+    def _parse_learnings(output: str) -> str | None:
+        """Extract the last ## Learnings section from Claude output."""
+        marker = "## Learnings"
+        idx = output.rfind(marker)
+        if idx == -1:
+            return None
+
+        section = output[idx + len(marker):]
+
+        # Trim at the next heading if present
+        for next_heading in ("\n## ", "\n# "):
+            end = section.find(next_heading)
+            if end != -1:
+                section = section[:end]
+
+        return section.strip() or None
+
+    async def _store(self, text: str, namespace: dict, metadata: dict) -> None:
+        """Store a memory, logging failures without raising."""
+        try:
+            await self.mem0.add(text, **namespace, metadata=metadata)
         except Exception:
-            logger.exception("Failed to extract memories for task %s", task.id)
+            logger.exception("Failed to store memory: %s", text[:80])

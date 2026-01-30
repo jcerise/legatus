@@ -19,6 +19,7 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 class CreateTaskRequest(BaseModel):
     prompt: str
     title: str | None = None
+    project: str | None = None
 
 
 @router.post("/", response_model=Task)
@@ -31,7 +32,7 @@ async def create_task(
     """Create a new task from a user prompt and spawn a dev agent."""
     manager = TaskManager(task_store)
 
-    task = await manager.create_task(prompt=req.prompt, title=req.title)
+    task = await manager.create_task(prompt=req.prompt, title=req.title, project=req.project)
 
     # Spawn a dev agent container for this task
     spawner = AgentSpawner(settings)

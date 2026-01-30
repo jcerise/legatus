@@ -61,6 +61,7 @@ class Task(BaseModel):
     checkpoint: CheckpointRef = Field(default_factory=CheckpointRef)
     artifacts: list[dict] = Field(default_factory=list)
     history: list[TaskEvent] = Field(default_factory=list)
+    project: str | None = None
     prompt: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

@@ -21,12 +21,17 @@ class GitOps:
 
     def init_repo(self) -> None:
         """Initialize a git repo if one doesn't exist."""
-        result = self._run("rev-parse", "--is-inside-work-tree", check=False)
-        if result.returncode != 0:
-            self._run("init")
+        try:
+            result = self._run("rev-parse", "--is-inside-work-tree", check=False)
+            if result.returncode != 0:
+                self._run("init")
+                logger.info("Initialized git repo in %s", self.workspace)
+
+            # Always ensure identity is configured
             self._run("config", "user.email", "legatus@local")
             self._run("config", "user.name", "Legatus")
-            logger.info("Initialized git repo in %s", self.workspace)
+        except subprocess.CalledProcessError as e:
+            logger.warning("Git init/config failed (permissions?): %s", e)
 
     def commit_changes(self, message: str) -> str | None:
         """Stage all changes and commit.

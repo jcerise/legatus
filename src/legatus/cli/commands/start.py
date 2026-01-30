@@ -9,6 +9,16 @@ console = Console()
 DEFAULT_URL = "http://localhost:8420"
 
 
+def _load_config() -> dict:
+    """Load .legatus/config.yaml if it exists."""
+    config_path = Path(".legatus/config.yaml")
+    if config_path.exists():
+        import yaml
+
+        return yaml.safe_load(config_path.read_text()) or {}
+    return {}
+
+
 def _get_orchestrator_url() -> str:
     """Discover orchestrator URL from env, config, or default."""
     import os
@@ -17,16 +27,18 @@ def _get_orchestrator_url() -> str:
     if url:
         return url
 
-    config_path = Path(".legatus/config.yaml")
-    if config_path.exists():
-        import yaml
-
-        config = yaml.safe_load(config_path.read_text())
-        url = (config.get("orchestrator") or {}).get("url")
-        if url:
-            return url
+    config = _load_config()
+    url = (config.get("orchestrator") or {}).get("url")
+    if url:
+        return url
 
     return DEFAULT_URL
+
+
+def _get_project_name() -> str | None:
+    """Read project name from .legatus/config.yaml."""
+    config = _load_config()
+    return (config.get("project") or {}).get("name")
 
 
 def start(
@@ -38,11 +50,16 @@ def start(
         prompt = spec.read_text()
 
     url = _get_orchestrator_url()
+    project = _get_project_name()
     console.print("[bold]Starting task...[/bold]")
+
+    payload: dict = {"prompt": prompt}
+    if project:
+        payload["project"] = project
 
     try:
         with httpx.Client(base_url=url, timeout=30.0) as client:
-            response = client.post("/tasks/", json={"prompt": prompt})
+            response = client.post("/tasks/", json=payload)
             response.raise_for_status()
             task = response.json()
     except httpx.ConnectError:

@@ -3,10 +3,8 @@ import logging
 
 from fastapi import WebSocket
 
-from legatus.memory.client import Mem0Client
-from legatus.memory.namespaces import MemoryNamespace
 from legatus.models.messages import Message, MessageType
-from legatus.models.task import Task
+from legatus.orchestrator.services.agent_spawner import AgentSpawner
 from legatus.orchestrator.services.git_ops import GitOps
 from legatus.orchestrator.services.task_manager import TaskManager
 from legatus.redis_client.pubsub import PubSubManager
@@ -24,14 +22,14 @@ class EventBus:
         task_store: TaskStore,
         state_store: StateStore,
         pubsub: PubSubManager,
-        mem0: Mem0Client,
         workspace_path: str,
+        spawner: AgentSpawner,
     ):
         self.task_manager = TaskManager(task_store)
         self.state_store = state_store
         self.pubsub = pubsub
-        self.mem0 = mem0
         self.git_ops = GitOps(workspace_path)
+        self.spawner = spawner
         self.ws_connections: list[WebSocket] = []
         self._task: asyncio.Task | None = None
 
@@ -76,12 +74,9 @@ class EventBus:
         if commit_hash:
             logger.info("Git commit: %s", commit_hash)
 
-        # Extract memories
-        await self._extract_memories(task, msg.data)
-
-        # Clean up agent state
+        # Clean up agent state and container
         if msg.agent_id:
-            await self.state_store.remove_agent(msg.agent_id)
+            await self._cleanup_agent(msg.agent_id)
 
     async def _on_task_failed(self, msg: Message) -> None:
         if not msg.task_id:
@@ -91,20 +86,16 @@ class EventBus:
         await self.task_manager.on_task_failed(msg.task_id, error)
 
         if msg.agent_id:
-            await self.state_store.remove_agent(msg.agent_id)
+            await self._cleanup_agent(msg.agent_id)
 
-    async def _extract_memories(self, task: Task, result: dict) -> None:
-        """Save task learnings to Mem0 project memory."""
-        output = result.get("output", "")
-        if not output:
-            return
-
-        try:
-            summary = f"Completed task '{task.title}': {output[:500]}"
-            ns = MemoryNamespace.project(task.id[:8])
-            await self.mem0.add(summary, **ns, metadata={"task_id": task.id})
-        except Exception:
-            logger.exception("Failed to extract memories for task %s", task.id)
+    async def _cleanup_agent(self, agent_id: str) -> None:
+        """Remove agent state from Redis and clean up its Docker container."""
+        agent_info = await self.state_store.get_agent_info(agent_id)
+        if agent_info and agent_info.container_id:
+            logs = self.spawner.collect_logs_and_remove(agent_info.container_id)
+            if logs:
+                logger.debug("Agent %s container logs:\n%s", agent_id, logs[-2000:])
+        await self.state_store.remove_agent(agent_id)
 
     async def _broadcast_to_ws(self, msg: Message) -> None:
         """Forward event to all connected WebSocket clients."""

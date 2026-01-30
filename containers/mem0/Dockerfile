@@ -7,7 +7,9 @@ RUN pip install --no-cache-dir \
     "fastapi==0.115.8" \
     "uvicorn==0.34.0" \
     "psycopg[pool]>=3.2.8" \
-    "python-dotenv==1.0.1"
+    "python-dotenv==1.0.1" \
+    "redis>=5.2" \
+    "redisvl>=0.4"
 
 COPY main.py /app/main.py
 

@@ -11,6 +11,7 @@ from legatus.orchestrator.routers.checkpoints import router as checkpoints_route
 from legatus.orchestrator.routers.health import router as health_router
 from legatus.orchestrator.routers.logs import router as logs_router
 from legatus.orchestrator.routers.tasks import router as tasks_router
+from legatus.orchestrator.services.agent_spawner import AgentSpawner
 from legatus.orchestrator.services.event_bus import EventBus
 from legatus.orchestrator.services.git_ops import GitOps
 from legatus.orchestrator.ws import websocket_endpoint
@@ -57,12 +58,13 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
 
     # Start event bus
+    spawner = AgentSpawner(settings)
     event_bus = EventBus(
         task_store=task_store,
         state_store=state_store,
         pubsub=pubsub,
-        mem0=mem0,
         workspace_path=settings.workspace_path,
+        spawner=spawner,
     )
     app.state.event_bus = event_bus
     event_bus_task = asyncio.create_task(event_bus.start())

@@ -41,6 +41,7 @@ class AgentSpawner:
             # Agent config from orchestrator settings
             "AGENT_TIMEOUT": str(self.settings.agent.timeout),
             "AGENT_MAX_TURNS": str(self.settings.agent.max_turns),
+            "PROJECT_ID": task.project or "",
         }
 
         # Use host_workspace_path for Docker volume mount (must be a host path,

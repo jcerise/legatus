@@ -88,11 +88,9 @@ When `legion init` is run, a `.legatus/` directory is established as the local c
 ```
 .legatus/
   config.yaml      # Standing orders and configuration
-  tasks/            # Campaign records
-  memory/           # Local intelligence cache
 ```
 
-All agent operations are confined to a sandboxed `workspace/` directory. Your source remains untouched unless you direct otherwise.
+Task state lives in Redis. Long-term memory is stored in Mem0, keyed by project name. All agent operations are confined to a sandboxed `workspace/` directory. Your source remains untouched unless you direct otherwise.
 
 ## Current Disposition
 

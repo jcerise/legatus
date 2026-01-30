@@ -38,9 +38,7 @@ def init(
 
     legatus_dir.mkdir()
     (legatus_dir / "config.yaml").write_text(_default_config(project_dir.name))
-    (legatus_dir / "tasks").mkdir()
-    (legatus_dir / "memory").mkdir()
 
     console.print(f"[green]Initialized legatus in {project_dir}[/green]")
-    console.print("  Created .legatus/ directory")
+    console.print("  Created .legatus/config.yaml")
     console.print('  Run [bold]legion start "your task"[/bold] to begin')

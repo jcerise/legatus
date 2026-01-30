@@ -41,6 +41,17 @@ def build_prompt(task: Task, memory_context: str) -> str:
     parts.append("## Instructions")
     parts.append("Complete this task by making the necessary code changes in /workspace.")
     parts.append("Focus on clean, well-structured code with appropriate error handling.")
+    parts.append("")
+
+    parts.append("## Learnings")
+    parts.append(
+        "After completing the task, end your response with a"
+        " `## Learnings` section containing:"
+    )
+    parts.append("- **Files modified**: List every file you created or changed")
+    parts.append("- **Patterns/conventions**: Coding patterns or project conventions you followed")
+    parts.append("- **Gotchas**: Anything surprising or tricky you encountered")
+    parts.append("- **Dependencies affected**: Any dependencies added, removed, or updated")
 
     return "\n".join(parts)
 
@@ -74,7 +85,7 @@ async def run_agent() -> None:
         await reporter.report_log(f"Agent {agent_id} starting task: {task.title}")
 
         # 2. Inject memories
-        project_id = task_id[:8]
+        project_id = os.environ.get("PROJECT_ID") or task_id[:8]
         memory_bridge = MemoryBridge(mem0, project_id)
         context = await memory_bridge.get_context(task)
 

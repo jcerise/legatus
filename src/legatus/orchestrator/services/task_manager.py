@@ -8,7 +8,9 @@ class TaskManager:
     def __init__(self, task_store: TaskStore):
         self._store = task_store
 
-    async def create_task(self, prompt: str, title: str | None = None) -> Task:
+    async def create_task(
+        self, prompt: str, title: str | None = None, project: str | None = None,
+    ) -> Task:
         """Create a new task from a user prompt and immediately plan it.
 
         In Phase 1 there is no PM agent, so we go CREATED -> PLANNED directly.
@@ -17,6 +19,7 @@ class TaskManager:
             title=title or prompt[:80],
             description=prompt,
             prompt=prompt,
+            project=project,
             type=TaskType.FEATURE,
             history=[TaskEvent(event="created", by="user")],
         )
