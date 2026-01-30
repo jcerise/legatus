@@ -83,7 +83,9 @@ async def run_agent() -> None:
         logger.info("Prompt length: %d chars", len(prompt))
 
         # 4. Execute Claude Code
-        executor = Executor(workspace=workspace)
+        timeout = int(os.environ.get("AGENT_TIMEOUT", "600"))
+        max_turns = int(os.environ.get("AGENT_MAX_TURNS", "50"))
+        executor = Executor(workspace=workspace, timeout=timeout, max_turns=max_turns)
         result = executor.run(prompt)
 
         # 5. Report result

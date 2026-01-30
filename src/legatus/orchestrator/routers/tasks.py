@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -8,6 +10,8 @@ from legatus.orchestrator.services.agent_spawner import AgentSpawner
 from legatus.orchestrator.services.task_manager import TaskManager
 from legatus.redis_client.state import StateStore
 from legatus.redis_client.task_store import TaskStore
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -31,7 +35,15 @@ async def create_task(
 
     # Spawn a dev agent container for this task
     spawner = AgentSpawner(settings)
-    agent_info = spawner.spawn_dev_agent(task)
+    try:
+        agent_info = spawner.spawn_dev_agent(task)
+    except Exception as e:
+        logger.error("Failed to spawn agent for task %s: %s", task.id, e)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to spawn agent container: {e}",
+        ) from e
+
     await state_store.set_agent_info(agent_info)
 
     # Transition to ACTIVE

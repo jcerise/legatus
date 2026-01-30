@@ -46,10 +46,20 @@ class Executor:
             if result.returncode == 0:
                 try:
                     output_data = json.loads(result.stdout)
+                    is_error = output_data.get("is_error", False)
+                    if is_error:
+                        return {
+                            "success": False,
+                            "output": output_data.get("result", ""),
+                            "cost": output_data.get("total_cost_usd"),
+                            "error": output_data.get("result", "Claude Code reported an error"),
+                        }
                     return {
                         "success": True,
                         "output": output_data.get("result", result.stdout),
-                        "cost": output_data.get("cost_usd"),
+                        "cost": output_data.get("total_cost_usd"),
+                        "num_turns": output_data.get("num_turns"),
+                        "session_id": output_data.get("session_id"),
                         "error": None,
                     }
                 except json.JSONDecodeError:
@@ -60,6 +70,7 @@ class Executor:
                         "error": None,
                     }
             else:
+                logger.error("Claude Code exit code %d: %s", result.returncode, result.stderr)
                 return {
                     "success": False,
                     "output": result.stdout,

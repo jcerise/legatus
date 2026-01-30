@@ -35,6 +35,12 @@ class AgentSpawner:
             "MEM0_URL": self.settings.mem0.url,
             "ANTHROPIC_API_KEY": self.settings.anthropic_api_key,
             "WORKSPACE_PATH": "/workspace",
+            # Claude Code headless operation
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "DISABLE_AUTOUPDATER": "1",
+            # Agent config from orchestrator settings
+            "AGENT_TIMEOUT": str(self.settings.agent.timeout),
+            "AGENT_MAX_TURNS": str(self.settings.agent.max_turns),
         }
 
         # Use host_workspace_path for Docker volume mount (must be a host path,
@@ -47,12 +53,15 @@ class AgentSpawner:
             }
         }
 
+        # Validate the Docker network exists
+        network_name = self._resolve_network()
+
         logger.info(
             "Spawning agent container: image=%s, agent=%s, task=%s, network=%s",
             self.settings.agent.image,
             agent_id,
             task.id,
-            self.settings.agent.network,
+            network_name,
         )
 
         container = self._docker.containers.run(
@@ -60,9 +69,9 @@ class AgentSpawner:
             name=f"legatus-agent-{agent_id}",
             environment=environment,
             volumes=volumes,
-            network=self.settings.agent.network,
+            network=network_name,
             detach=True,
-            auto_remove=True,
+            auto_remove=False,
         )
 
         return AgentInfo(
@@ -74,6 +83,32 @@ class AgentSpawner:
             started_at=datetime.now(UTC),
         )
 
+    def _resolve_network(self) -> str:
+        """Validate the configured network exists, with fallback discovery."""
+        name = self.settings.agent.network
+        try:
+            self._docker.networks.get(name)
+            return name
+        except docker.errors.NotFound:
+            pass
+
+        # Try to discover a matching network
+        networks = self._docker.networks.list(names=["legatus"])
+        if networks:
+            discovered = networks[0].name
+            logger.warning(
+                "Configured network %s not found, using discovered network: %s",
+                name,
+                discovered,
+            )
+            return discovered
+
+        available = [n.name for n in self._docker.networks.list()]
+        raise RuntimeError(
+            f"Docker network '{name}' not found. "
+            f"Is Docker Compose running? Available networks: {available}"
+        )
+
     def stop_agent(self, agent_info: AgentInfo) -> None:
         """Stop and remove an agent container."""
         if not agent_info.container_id:
@@ -81,8 +116,19 @@ class AgentSpawner:
         try:
             container = self._docker.containers.get(agent_info.container_id)
             container.stop(timeout=10)
+            container.remove()
         except docker.errors.NotFound:
             logger.debug("Container %s already removed", agent_info.container_id)
+
+    def collect_logs_and_remove(self, container_id: str) -> str | None:
+        """Collect logs from a stopped container, then remove it."""
+        try:
+            container = self._docker.containers.get(container_id)
+            logs = container.logs(stdout=True, stderr=True).decode("utf-8", errors="replace")
+            container.remove(force=True)
+            return logs
+        except docker.errors.NotFound:
+            return None
 
     def get_container_status(self, container_id: str) -> str | None:
         """Check if a container is still running."""

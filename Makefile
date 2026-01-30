@@ -11,6 +11,7 @@ agent-image: ## Build the agent Docker image
 	docker build -t legatus-agent:latest -f containers/agent/Dockerfile .
 
 up: agent-image ## Start all services
+	mkdir -p $(WORKSPACE)
 	WORKSPACE=$(WORKSPACE) docker compose up -d --build
 
 down: ## Stop all services
