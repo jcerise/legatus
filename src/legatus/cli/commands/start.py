@@ -17,7 +17,7 @@ def _get_orchestrator_url() -> str:
     if url:
         return url
 
-    config_path = Path(".agent-team/config.yaml")
+    config_path = Path(".legatus/config.yaml")
     if config_path.exists():
         import yaml
 
@@ -59,5 +59,5 @@ def start(
     if task.get("assigned_to"):
         console.print(f"  Agent: {task['assigned_to']}")
     console.print()
-    console.print("Run [bold]team status[/bold] to monitor progress")
-    console.print("Run [bold]team logs[/bold] to view activity")
+    console.print("Run [bold]legion status[/bold] to monitor progress")
+    console.print("Run [bold]legion logs[/bold] to view activity")

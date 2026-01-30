@@ -27,20 +27,20 @@ def init(
 ) -> None:
     """Initialize legatus in a project directory."""
     project_dir = path.resolve()
-    agent_team_dir = project_dir / ".agent-team"
+    legatus_dir = project_dir / ".legatus"
 
-    if agent_team_dir.exists():
+    if legatus_dir.exists():
         console.print("[yellow]Already initialized.[/yellow]")
         raise typer.Exit(code=1)
 
     if not project_dir.exists():
         project_dir.mkdir(parents=True)
 
-    agent_team_dir.mkdir()
-    (agent_team_dir / "config.yaml").write_text(_default_config(project_dir.name))
-    (agent_team_dir / "tasks").mkdir()
-    (agent_team_dir / "memory").mkdir()
+    legatus_dir.mkdir()
+    (legatus_dir / "config.yaml").write_text(_default_config(project_dir.name))
+    (legatus_dir / "tasks").mkdir()
+    (legatus_dir / "memory").mkdir()
 
     console.print(f"[green]Initialized legatus in {project_dir}[/green]")
-    console.print("  Created .agent-team/ directory")
-    console.print('  Run [bold]team start "your task"[/bold] to begin')
+    console.print("  Created .legatus/ directory")
+    console.print('  Run [bold]legion start "your task"[/bold] to begin')

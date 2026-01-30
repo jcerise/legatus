@@ -31,7 +31,7 @@ dev = [
 ]
 
 [project.scripts]
-team = "legatus.cli.app:main"
+legion = "legatus.cli.app:main"
 legatus-orchestrator = "legatus.orchestrator.app:run"
 legatus-agent = "legatus.agent.entrypoint:main"
 

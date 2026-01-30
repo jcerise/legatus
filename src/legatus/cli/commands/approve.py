@@ -13,7 +13,7 @@ def _get_orchestrator_url() -> str:
     if url:
         return url
 
-    config_path = Path(".agent-team/config.yaml")
+    config_path = Path(".legatus/config.yaml")
     if config_path.exists():
         import yaml
 

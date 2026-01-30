@@ -1,0 +1,4 @@
+orchestrator:
+  url: http://localhost:8420
+project:
+  name: legatus

@@ -7,7 +7,7 @@ from legatus.cli.commands.start import start
 from legatus.cli.commands.status import status
 
 app = typer.Typer(
-    name="team",
+    name="legion",
     help="Legatus - Multi-agent software engineering orchestration",
     no_args_is_help=True,
 )
