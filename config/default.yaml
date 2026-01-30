@@ -1,0 +1,15 @@
+orchestrator:
+  host: "0.0.0.0"
+  rest_port: 8420
+
+redis:
+  url: "redis://localhost:6379"
+
+mem0:
+  url: "http://localhost:8000"
+
+agent:
+  image: "legatus-agent:latest"
+  timeout: 600
+  max_turns: 50
+  network: "legatus_default"

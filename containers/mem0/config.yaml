@@ -1,0 +1,8 @@
+vector_store:
+  provider: redis
+  config:
+    collection_name: legatus_memories
+    embedding_model_dims: 1536
+    redis_url: redis://redis:6379
+
+version: v1.1

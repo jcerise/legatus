@@ -1,0 +1,55 @@
+[project]
+name = "legatus"
+version = "0.1.0"
+description = "Multi-agent software engineering orchestration system"
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.15,<1",
+    "rich>=13,<14",
+    "httpx>=0.28,<1",
+    "websockets>=14,<15",
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.7,<3",
+    "pyyaml>=6,<7",
+]
+
+[project.optional-dependencies]
+orchestrator = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.34,<1",
+    "redis>=5.2,<6",
+    "docker>=7.1,<8",
+]
+agent = [
+    "redis>=5.2,<6",
+    "httpx>=0.28,<1",
+]
+dev = [
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.25,<1",
+    "ruff>=0.9,<1",
+]
+
+[project.scripts]
+team = "legatus.cli.app:main"
+legatus-orchestrator = "legatus.orchestrator.app:run"
+legatus-agent = "legatus.agent.entrypoint:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/legatus"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM"]
+ignore = ["B008"]  # FastAPI Depends() and Typer Argument/Option in defaults
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

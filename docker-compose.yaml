@@ -1,0 +1,75 @@
+services:
+  # ===================
+  # ORCHESTRATOR
+  # ===================
+  orchestrator:
+    build:
+      context: .
+      dockerfile: containers/orchestrator/Dockerfile
+    ports:
+      - "8420:8420"
+    volumes:
+      - ${WORKSPACE}:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - LEGATUS_REDIS__URL=redis://redis:6379
+      - LEGATUS_MEM0__URL=http://mem0:8000
+      - LEGATUS_ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - LEGATUS_OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LEGATUS_WORKSPACE_PATH=/workspace
+      - LEGATUS_AGENT__IMAGE=legatus-agent:latest
+      - LEGATUS_AGENT__NETWORK=legatus_default
+      - LEGATUS_AGENT__HOST_WORKSPACE_PATH=${WORKSPACE}
+    depends_on:
+      redis:
+        condition: service_healthy
+      mem0:
+        condition: service_started
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8420/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===================
+  # SHARED SERVICES
+  # ===================
+  redis:
+    image: redis/redis-stack:latest
+    ports:
+      - "6379:6379"
+      - "8001:8001"
+    volumes:
+      - redis-data:/data
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  mem0:
+    build:
+      context: containers/mem0
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - MEM0_REDIS_URL=redis://redis:6379
+      - MEM0_COLLECTION=legatus_memories
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - default
+
+volumes:
+  redis-data:
+
+networks:
+  default:
+    driver: bridge
