@@ -19,18 +19,26 @@ class AgentSpawner:
         self.settings = settings
         self._docker = docker.from_env()
 
-    def spawn_dev_agent(self, task: Task) -> AgentInfo:
-        """Spawn an ephemeral Docker container for a dev agent.
+    def spawn_agent(self, task: Task, role: AgentRole) -> AgentInfo:
+        """Spawn an ephemeral Docker container for an agent.
 
         The container connects to the same Docker network as the compose
         services, mounts the workspace, and receives task/config via env vars.
         """
-        agent_id = f"dev_{uuid4().hex[:8]}"
+        agent_id = f"{role.value}_{uuid4().hex[:8]}"
+
+        timeout = self.settings.agent.timeout
+        max_turns = self.settings.agent.max_turns
+
+        # PM agents get tighter limits — they only read and plan
+        if role == AgentRole.PM:
+            timeout = min(timeout, 300)
+            max_turns = min(max_turns, 30)
 
         environment = {
             "TASK_ID": task.id,
             "AGENT_ID": agent_id,
-            "AGENT_ROLE": "dev",
+            "AGENT_ROLE": role.value,
             "REDIS_URL": self.settings.redis.url,
             "MEM0_URL": self.settings.mem0.url,
             "ANTHROPIC_API_KEY": self.settings.anthropic_api_key,
@@ -39,8 +47,8 @@ class AgentSpawner:
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
             "DISABLE_AUTOUPDATER": "1",
             # Agent config from orchestrator settings
-            "AGENT_TIMEOUT": str(self.settings.agent.timeout),
-            "AGENT_MAX_TURNS": str(self.settings.agent.max_turns),
+            "AGENT_TIMEOUT": str(timeout),
+            "AGENT_MAX_TURNS": str(max_turns),
             "PROJECT_ID": task.project or "",
         }
 
@@ -58,11 +66,11 @@ class AgentSpawner:
         network_name = self._resolve_network()
 
         logger.info(
-            "Spawning agent container: image=%s, agent=%s, task=%s, network=%s",
+            "Spawning %s agent container: image=%s, agent=%s, task=%s",
+            role.value,
             self.settings.agent.image,
             agent_id,
             task.id,
-            network_name,
         )
 
         container = self._docker.containers.run(
@@ -77,12 +85,16 @@ class AgentSpawner:
 
         return AgentInfo(
             id=agent_id,
-            role=AgentRole.DEV,
+            role=role,
             status=AgentStatus.STARTING,
             container_id=container.id,
             task_id=task.id,
             started_at=datetime.now(UTC),
         )
+
+    def spawn_dev_agent(self, task: Task) -> AgentInfo:
+        """Convenience wrapper for spawning a dev agent."""
+        return self.spawn_agent(task, AgentRole.DEV)
 
     def _resolve_network(self) -> str:
         """Validate the configured network exists, with fallback discovery."""

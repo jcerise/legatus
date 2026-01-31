@@ -25,8 +25,25 @@ def render_status_panel(
     tasks: list[dict],
     agents: list[dict],
     recent_logs: list[dict],
+    checkpoints: list[dict] | None = None,
 ) -> None:
     """Render the full status display with Rich panels and tables."""
+    # Pending checkpoints (show prominently at the top)
+    if checkpoints:
+        for cp in checkpoints:
+            cp_id = cp.get("id", "?")
+            title = cp.get("title", "Checkpoint")
+            console.print(
+                f"[bold yellow]>>> Awaiting approval:[/bold yellow]"
+                f" {title}"
+            )
+            console.print(
+                f"    [bold]legion approve[/bold]  or"
+                f"  [bold]legion reject {cp_id}"
+                f' "reason"[/bold]'
+            )
+            console.print()
+
     # Agents
     if agents:
         agent_table = Table(title="Agents", show_header=True, title_style="bold")
@@ -56,9 +73,12 @@ def render_status_panel(
         for task in tasks:
             status = task.get("status", "unknown")
             icon = STATUS_ICONS.get(status, "[ ]")
+            title = (task.get("title", "") or "")[:50]
+            if task.get("parent_id"):
+                title = f"  |-- {title}"
             task_table.add_row(
                 task["id"],
-                (task.get("title", "") or "")[:50],
+                title,
                 f"{icon} {status}",
                 task.get("assigned_to", "-") or "-",
             )

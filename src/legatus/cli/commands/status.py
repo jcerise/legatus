@@ -29,12 +29,13 @@ def _get_orchestrator_url() -> str:
     return "http://localhost:8420"
 
 
-def _fetch_status(url: str) -> tuple[list, list, list]:
+def _fetch_status(url: str) -> tuple[list, list, list, list]:
     with httpx.Client(base_url=url, timeout=10.0) as client:
         tasks = client.get("/tasks/").json()
         agents = client.get("/agents/").json()
         logs = client.get("/logs/", params={"limit": 5}).json()
-    return tasks, agents, logs
+        checkpoints = client.get("/checkpoints/").json()
+    return tasks, agents, logs, checkpoints
 
 
 def status(
@@ -48,12 +49,12 @@ def status(
         return
 
     try:
-        tasks, agents, logs = _fetch_status(url)
+        tasks, agents, logs, checkpoints = _fetch_status(url)
     except httpx.ConnectError:
         console.print(f"[red]Cannot connect to orchestrator at {url}[/red]")
         raise typer.Exit(code=1) from None
 
-    render_status_panel(console, tasks, agents, logs)
+    render_status_panel(console, tasks, agents, logs, checkpoints)
 
 
 def _watch_status(url: str) -> None:
@@ -64,7 +65,7 @@ def _watch_status(url: str) -> None:
         with Live(console=console, refresh_per_second=1) as live:
             while True:
                 try:
-                    tasks, agents, logs = _fetch_status(url)
+                    tasks, agents, logs, checkpoints = _fetch_status(url)
                     # Re-render to a temporary console to capture output
                     from io import StringIO
 
@@ -72,7 +73,7 @@ def _watch_status(url: str) -> None:
 
                     buf = StringIO()
                     tmp = TmpConsole(file=buf, force_terminal=True, width=console.width)
-                    render_status_panel(tmp, tasks, agents, logs)
+                    render_status_panel(tmp, tasks, agents, logs, checkpoints)
                     live.update(buf.getvalue())
                 except httpx.ConnectError:
                     live.update("[red]Connection lost. Retrying...[/red]")

@@ -65,6 +65,7 @@ async def lifespan(app: FastAPI):
         pubsub=pubsub,
         workspace_path=settings.workspace_path,
         spawner=spawner,
+        redis_client=redis,
     )
     app.state.event_bus = event_bus
     event_bus_task = asyncio.create_task(event_bus.start())

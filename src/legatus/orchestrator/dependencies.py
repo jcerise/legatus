@@ -2,6 +2,7 @@ from fastapi import Request
 
 from legatus.memory.client import Mem0Client
 from legatus.models.config import LegatusSettings
+from legatus.orchestrator.services.event_bus import EventBus
 from legatus.redis_client.client import RedisClient
 from legatus.redis_client.pubsub import PubSubManager
 from legatus.redis_client.state import StateStore
@@ -30,3 +31,7 @@ def get_mem0(request: Request) -> Mem0Client:
 
 def get_settings(request: Request) -> LegatusSettings:
     return request.app.state.settings
+
+
+def get_event_bus(request: Request) -> EventBus:
+    return request.app.state.event_bus

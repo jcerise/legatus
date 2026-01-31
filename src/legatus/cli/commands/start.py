@@ -44,6 +44,10 @@ def _get_project_name() -> str | None:
 def start(
     prompt: str = typer.Argument(..., help="Task description or prompt"),
     spec: Path | None = typer.Option(None, "--spec", "-s", help="Read prompt from a spec file"),
+    direct: bool = typer.Option(
+        False, "--direct", "-d",
+        help="Skip PM planning, send directly to dev agent",
+    ),
 ) -> None:
     """Start a new task."""
     if spec and spec.exists():
@@ -56,6 +60,8 @@ def start(
     payload: dict = {"prompt": prompt}
     if project:
         payload["project"] = project
+    if direct:
+        payload["direct"] = True
 
     try:
         with httpx.Client(base_url=url, timeout=30.0) as client:
