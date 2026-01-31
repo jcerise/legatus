@@ -1,8 +1,8 @@
 # Legatus
 
-A command-and-control system for software engineering agents. Legatus deploys autonomous AI agents as ephemeral operatives, coordinated through a central command structure, to execute engineering tasks against your codebase.
+A command-and-control system for software engineering agents. Legatus deploys autonomous AI agents as ephemeral operatives, coordinated through a central command structure, to execute engineering campaigns against your codebase.
 
-In the Roman legion, the *legatus legionis* commanded thousands from a single seat of authority. This system operates on the same principle: one orchestrator dispatches agents, tracks their campaigns, and consolidates their conquests into your repository.
+In the Roman legion, the *legatus legionis* commanded thousands from a single seat of authority. This system operates on the same principle: one orchestrator dispatches agents, tracks their campaigns, and consolidates their conquests into your repository. A *praefectus* (PM agent) surveys the terrain and decomposes orders into tactical objectives, then dev agents are dispatched sequentially to execute each objective in turn.
 
 ## Architecture
 
@@ -19,7 +19,8 @@ In the Roman legion, the *legatus legionis* commanded thousands from a single se
 ```
 
 - **Orchestrator** -- FastAPI service (port 8420) that receives orders, manages the campaign ledger, and spawns agent containers via Docker
-- **Agents** -- Ephemeral Docker containers, each running Claude Code against the workspace. Deployed on command, destroyed on completion
+- **PM Agent (praefectus)** -- Analyses the battlefield and decomposes a campaign into sequential tactical objectives. Presents the battle plan for your approval before any operative is deployed
+- **Dev Agents (milites)** -- Ephemeral Docker containers, each running Claude Code against the workspace. Deployed on command, destroyed on completion. Execute one objective at a time
 - **Redis** -- State store and courier system. Task records, agent status, and pub/sub messaging between all components
 - **Mem0** -- Long-term intelligence. Agents store and retrieve institutional knowledge across campaigns
 - **CLI (`legion`)** -- Your interface to issue orders and observe the field
@@ -52,8 +53,11 @@ make build && make up
 # Initialize a project workspace
 legion init
 
-# Dispatch an agent with orders
+# Issue campaign orders (praefectus decomposes, then dev agents execute)
 legion start "Implement a REST endpoint for user authentication"
+
+# Bypass the praefectus -- send a lone operative directly
+legion start --direct "Fix the typo in the README"
 
 # Survey the battlefield
 legion status
@@ -63,9 +67,9 @@ legion status --watch
 legion logs
 legion logs --follow
 
-# Rule on agent checkpoints (when human approval is required)
-legion approve <checkpoint-id>
-legion reject <checkpoint-id>
+# Rule on the praefectus' battle plan
+legion approve
+legion reject <checkpoint-id> "Consolidate the flanks"
 ```
 
 ## Standing Orders
@@ -94,9 +98,14 @@ Task state lives in Redis. Long-term memory is stored in Mem0, keyed by project 
 
 ## Current Disposition
 
-This is **Phase 1** -- the core command structure is operational. The orchestrator accepts tasks, spawns agents, and tracks state. The following campaigns remain:
+**Phase 1** -- the core command structure is operational. The orchestrator accepts tasks, spawns agents, and tracks state.
 
-- Agent container hardening (Claude Code auth, error recovery)
-- Multi-agent coordination (task decomposition, parallel operations)
-- Review and approval workflows
-- Checkpoint-based human-in-the-loop control
+**Phase 2 (in progress)** -- the *praefectus* has taken the field. Campaign orders are now decomposed into tactical objectives by a PM agent before dev agents are dispatched. The commander (you) reviews and approves the battle plan via checkpoints before any operative touches the codebase. Objectives are executed sequentially, each building on the conquests of the last.
+
+The following campaigns remain:
+
+- Parallel agent operations (branch-per-agent, orchestrator-managed merges)
+- QA agent (*tesserarius*) -- automated test generation and verification
+- Review agent (*optio*) -- code review before task completion
+- Architect agent (*praefectus castrorum*) -- high-level design and ADRs
+- Agent container hardening (error recovery, resource limits)
