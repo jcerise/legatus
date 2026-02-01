@@ -43,6 +43,8 @@ def render_status_panel(
                 role_badge = "[bold magenta][Architect][/bold magenta] "
             elif source == "pm":
                 role_badge = "[bold blue][PM][/bold blue] "
+            elif source == "reviewer":
+                role_badge = "[bold green][Reviewer][/bold green] "
 
             # Build checkpoint content
             lines = [

@@ -103,15 +103,68 @@ class TaskDispatcher:
 
         return False
 
-    async def on_subtask_complete(self, parent_id: str) -> None:
+    async def dispatch_single(self, task: Task) -> bool:
+        """Re-dispatch a specific task to a DEV agent.
+
+        Used for reviewer retry: transitions PLANNED → ACTIVE
+        and spawns a DEV agent. Injects architect context from
+        the parent if available (skips duplication check).
+
+        Returns True if the agent was spawned successfully.
+        """
+        # Inject architect context if parent has it
+        if task.parent_id:
+            parent = await self.task_store.get(task.parent_id)
+            if parent:
+                architect_ctx = _format_architect_context(parent)
+                if architect_ctx and architect_ctx not in task.description:
+                    task.description = task.description + architect_ctx
+                    await self.task_store.update(task)
+
+        try:
+            agent_info = self.spawner.spawn_agent(
+                task, AgentRole.DEV,
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to spawn dev agent for task %s: %s",
+                task.id, e,
+            )
+            return False
+
+        await self.state_store.set_agent_info(agent_info)
+        await self.task_store.update_status(
+            task.id, TaskStatus.ACTIVE,
+            event_by="orchestrator",
+            event_detail=f"retry agent={agent_info.id}",
+        )
+        task_updated = await self.task_store.get(task.id)
+        if task_updated:
+            task_updated.assigned_to = agent_info.id
+            await self.task_store.update(task_updated)
+
+        logger.info(
+            "Re-dispatched task %s (%s) with agent %s",
+            task.id, task.title, agent_info.id,
+        )
+        return True
+
+    async def on_subtask_complete(
+        self, parent_id: str,
+    ) -> str | None:
         """Called when a sub-task finishes.
 
-        Dispatches the next ready sub-task, or completes/fails
-        the parent if all children are finished.
+        Returns a signal string instead of transitioning the parent:
+        - "all_done" — all children DONE, parent NOT transitioned
+        - "failed" — a child REJECTED, parent marked REJECTED
+        - None — more children pending, next one dispatched
+
+        The caller (EventBus) decides whether to spawn a
+        per-campaign reviewer or complete the parent directly.
         """
         parent = await self.task_store.get(parent_id)
         if parent is None:
-            return
+            return None
 
         all_done = True
         any_failed = False
@@ -123,23 +176,6 @@ class TaskDispatcher:
                 any_failed = True
             elif child.status != TaskStatus.DONE:
                 all_done = False
-
-        if all_done and not any_failed:
-            logger.info(
-                "All sub-tasks done for parent %s, completing",
-                parent_id,
-            )
-            await self.task_store.update_status(
-                parent_id, TaskStatus.REVIEW,
-                event_by="orchestrator",
-                event_detail="all sub-tasks completed",
-            )
-            await self.task_store.update_status(
-                parent_id, TaskStatus.DONE,
-                event_by="orchestrator",
-                event_detail="all sub-tasks done",
-            )
-            return
 
         if any_failed:
             logger.error(
@@ -155,7 +191,14 @@ class TaskDispatcher:
                 event_by="orchestrator",
                 event_detail="sub-task failure",
             )
-            return
+            return "failed"
+
+        if all_done:
+            logger.info(
+                "All sub-tasks done for parent %s",
+                parent_id,
+            )
+            return "all_done"
 
         # Not all done yet — try to dispatch the next one
         dispatched = await self.dispatch_next(parent_id)
@@ -165,6 +208,7 @@ class TaskDispatcher:
                 " (waiting on running task)",
                 parent_id,
             )
+        return None
 
     async def cleanup_subtasks(self, parent_id: str) -> None:
         """Mark all pending sub-tasks as REJECTED.

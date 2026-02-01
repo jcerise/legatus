@@ -8,6 +8,7 @@ class AgentRole(StrEnum):
     DEV = "dev"
     PM = "pm"
     ARCHITECT = "architect"
+    REVIEWER = "reviewer"
 
 
 class AgentStatus(StrEnum):

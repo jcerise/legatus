@@ -1,5 +1,12 @@
+from enum import StrEnum
+
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
+
+
+class ReviewMode(StrEnum):
+    PER_SUBTASK = "per_subtask"
+    PER_CAMPAIGN = "per_campaign"
 
 
 class RedisConfig(BaseModel):
@@ -22,6 +29,9 @@ class AgentConfig(BaseModel):
     network: str = "legatus_default"
     host_workspace_path: str = ""
     architect_review: bool = True
+    reviewer_enabled: bool = False
+    review_mode: ReviewMode = ReviewMode.PER_SUBTASK
+    reviewer_max_retries: int = 1
 
 
 class LegatusSettings(BaseSettings):

@@ -4,7 +4,7 @@ import logging
 from fastapi import WebSocket
 
 from legatus.models.agent import AgentRole, AgentStatus
-from legatus.models.config import LegatusSettings
+from legatus.models.config import LegatusSettings, ReviewMode
 from legatus.models.messages import Message, MessageType
 from legatus.models.task import Task, TaskEvent, TaskStatus
 from legatus.orchestrator.services.agent_spawner import AgentSpawner
@@ -16,6 +16,10 @@ from legatus.orchestrator.services.checkpoint_manager import (
 )
 from legatus.orchestrator.services.git_ops import GitOps
 from legatus.orchestrator.services.pm_parser import parse_pm_output
+from legatus.orchestrator.services.reviewer_parser import (
+    ReviewResult,
+    parse_reviewer_output,
+)
 from legatus.orchestrator.services.task_dispatcher import TaskDispatcher
 from legatus.orchestrator.services.task_manager import TaskManager
 from legatus.redis_client.client import RedisClient
@@ -112,6 +116,8 @@ class EventBus:
                 await self._on_pm_complete(msg)
             case AgentRole.ARCHITECT:
                 await self._on_architect_complete(msg)
+            case AgentRole.REVIEWER:
+                await self._on_reviewer_complete(msg)
             case _:
                 await self._on_dev_complete(msg)
 
@@ -294,12 +300,17 @@ class EventBus:
         )
 
     async def _on_dev_complete(self, msg: Message) -> None:
-        """Handle dev agent completion: mark done, git commit,
-        and dispatch next sub-task if applicable."""
+        """Handle dev agent completion: store output, git commit,
+        and either route to reviewer or mark done."""
         task_id = msg.task_id
-        task = await self.task_manager.on_task_complete(
-            task_id, msg.data,
-        )
+        output = msg.data.get("output", "")
+
+        # Store dev output on the task
+        task = await self.task_store.get(task_id)
+        if task is None:
+            return
+        task.agent_outputs["dev"] = output
+        await self.task_store.update(task)
 
         # Git commit (best-effort — don't block dispatch)
         try:
@@ -313,10 +324,294 @@ class EventBus:
                 "Git commit failed for task %s", task_id,
             )
 
-        # If this is a sub-task, dispatch the next one
-        if task.parent_id:
-            await self.dispatcher.on_subtask_complete(
-                task.parent_id,
+        # Check if reviewer is enabled for per-subtask mode
+        reviewer_enabled = (
+            self.settings.agent.reviewer_enabled
+            if self.settings
+            else False
+        )
+        review_mode = (
+            self.settings.agent.review_mode
+            if self.settings
+            else ReviewMode.PER_SUBTASK
+        )
+
+        if (
+            reviewer_enabled
+            and review_mode == ReviewMode.PER_SUBTASK
+            and task.parent_id
+        ):
+            # Route to reviewer: ACTIVE → REVIEW only
+            await self.task_store.update_status(
+                task_id, TaskStatus.REVIEW,
+                event_by="agent",
+                event_detail="dev complete, awaiting review",
+            )
+            await self._spawn_reviewer(task)
+        else:
+            # Original path: ACTIVE → REVIEW → DONE
+            await self.task_manager.on_task_complete(
+                task_id, msg.data,
+            )
+            await self._handle_subtask_done(task)
+
+    async def _spawn_reviewer(self, task: Task) -> None:
+        """Spawn a reviewer agent for the given task.
+
+        Falls back to auto-approve if spawning fails.
+        """
+        try:
+            agent_info = self.spawner.spawn_agent(
+                task, AgentRole.REVIEWER,
+            )
+            await self.state_store.set_agent_info(agent_info)
+            logger.info(
+                "Spawned reviewer agent %s for task %s",
+                agent_info.id, task.id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to spawn reviewer for task %s,"
+                " auto-approving",
+                task.id,
+            )
+            # Auto-approve on spawn failure
+            await self._reviewer_approve(task)
+
+    async def _on_reviewer_complete(self, msg: Message) -> None:
+        """Handle Reviewer agent completion: parse output and
+        route to approve, reject, or security checkpoint."""
+        task_id = msg.task_id
+        output = msg.data.get("output", "")
+
+        task = await self.task_store.get(task_id)
+        if task is None:
+            return
+
+        # Store reviewer output
+        task.agent_outputs["reviewer"] = output
+        await self.task_store.update(task)
+
+        review = parse_reviewer_output(output)
+
+        # Security concerns always create a checkpoint
+        if review and review.security_concerns:
+            await self._reviewer_security_checkpoint(task, review)
+            return
+
+        if review is None or review.verdict == "approve":
+            # Parse failure → auto-approve
+            await self._reviewer_approve(task)
+        else:
+            await self._reviewer_reject(task, review)
+
+    async def _reviewer_approve(self, task: Task) -> None:
+        """Approve: REVIEW → DONE, then handle subtask completion."""
+        await self.task_store.update_status(
+            task.id, TaskStatus.DONE,
+            event_by="reviewer",
+            event_detail="reviewer approved",
+        )
+        logger.info(
+            "Reviewer approved task %s", task.id,
+        )
+        # Re-fetch task to get updated status
+        task = await self.task_store.get(task.id)
+        if task:
+            await self._handle_subtask_done(task)
+
+    async def _reviewer_reject(
+        self, task: Task, review: ReviewResult,
+    ) -> None:
+        """Reject: retry DEV or escalate to checkpoint."""
+        max_retries = (
+            self.settings.agent.reviewer_max_retries
+            if self.settings
+            else 1
+        )
+        retry_count = int(
+            task.agent_outputs.get("reviewer_retry_count", "0")
+        )
+
+        if retry_count < max_retries:
+            # Store feedback for the next DEV run
+            task.agent_outputs["reviewer_feedback"] = review.summary
+            task.agent_outputs["reviewer_retry_count"] = str(
+                retry_count + 1
+            )
+            await self.task_store.update(task)
+
+            # REVIEW → REJECTED → PLANNED, then re-dispatch
+            await self.task_store.update_status(
+                task.id, TaskStatus.REJECTED,
+                event_by="reviewer",
+                event_detail=f"rejected (retry {retry_count + 1}/"
+                f"{max_retries}): {review.summary[:200]}",
+            )
+            await self.task_store.update_status(
+                task.id, TaskStatus.PLANNED,
+                event_by="orchestrator",
+                event_detail="queued for retry",
+            )
+
+            # Re-fetch and re-dispatch
+            task = await self.task_store.get(task.id)
+            if task:
+                dispatched = await self.dispatcher.dispatch_single(
+                    task,
+                )
+                if not dispatched:
+                    logger.error(
+                        "Failed to re-dispatch task %s after"
+                        " reviewer rejection",
+                        task.id,
+                    )
+            logger.info(
+                "Reviewer rejected task %s, retrying DEV"
+                " (attempt %d/%d)",
+                task.id if task else "?",
+                retry_count + 1,
+                max_retries,
+            )
+        else:
+            # Retries exhausted — escalate to user
+            desc_lines = [
+                f"Reviewer rejected task '{task.title}' after"
+                f" {max_retries} DEV retry(ies).",
+                "",
+                f"**Summary**: {review.summary}",
+                "",
+            ]
+            if review.findings:
+                desc_lines.append("**Findings:**")
+                for f in review.findings:
+                    desc_lines.append(
+                        f"- [{f.severity}] {f.category}"
+                        f" ({f.file}): {f.description}"
+                    )
+                desc_lines.append("")
+
+            await self.checkpoint_manager.create(
+                task_id=task.id,
+                title=f"Review failed: {task.title}",
+                description="\n".join(desc_lines),
+                source_role="reviewer",
+            )
+            logger.info(
+                "Reviewer rejected task %s, retries exhausted,"
+                " checkpoint created",
+                task.id,
+            )
+
+    async def _reviewer_security_checkpoint(
+        self, task: Task, review: ReviewResult,
+    ) -> None:
+        """Security concerns found — always create checkpoint."""
+        desc_lines = [
+            f"Reviewer found security concerns in"
+            f" '{task.title}':",
+            "",
+            f"**Verdict**: {review.verdict}",
+            f"**Summary**: {review.summary}",
+            "",
+            "**Security Concerns:**",
+        ]
+        for concern in review.security_concerns:
+            desc_lines.append(f"- {concern}")
+        desc_lines.append("")
+
+        if review.findings:
+            desc_lines.append("**Findings:**")
+            for f in review.findings:
+                desc_lines.append(
+                    f"- [{f.severity}] {f.category}"
+                    f" ({f.file}): {f.description}"
+                )
+            desc_lines.append("")
+
+        await self.checkpoint_manager.create(
+            task_id=task.id,
+            title=f"Security review: {task.title}",
+            description="\n".join(desc_lines),
+            source_role="reviewer",
+        )
+        logger.info(
+            "Reviewer flagged security concerns for task %s,"
+            " checkpoint created",
+            task.id,
+        )
+
+    async def _handle_subtask_done(self, task: Task) -> None:
+        """Shared helper called after a sub-task reaches DONE.
+
+        If the task has a parent, calls the dispatcher to check
+        whether more sub-tasks remain or the campaign is done.
+        """
+        if not task.parent_id:
+            return
+
+        result = await self.dispatcher.on_subtask_complete(
+            task.parent_id,
+        )
+        if result == "all_done":
+            await self._on_campaign_done(task.parent_id)
+
+    async def _on_campaign_done(self, parent_id: str) -> None:
+        """Called when all sub-tasks for a campaign are finished.
+
+        If per-campaign review is enabled, spawns a reviewer on
+        the parent task with aggregated dev outputs. Otherwise,
+        marks the parent as done directly.
+        """
+        reviewer_enabled = (
+            self.settings.agent.reviewer_enabled
+            if self.settings
+            else False
+        )
+        review_mode = (
+            self.settings.agent.review_mode
+            if self.settings
+            else ReviewMode.PER_SUBTASK
+        )
+
+        parent = await self.task_store.get(parent_id)
+        if parent is None:
+            return
+
+        if (
+            reviewer_enabled
+            and review_mode == ReviewMode.PER_CAMPAIGN
+        ):
+            # Aggregate child dev outputs into parent
+            aggregated = []
+            for child_id in parent.subtask_ids:
+                child = await self.task_store.get(child_id)
+                if child and child.agent_outputs.get("dev"):
+                    aggregated.append(
+                        f"### Sub-task: {child.title}\n"
+                        f"{child.agent_outputs['dev']}"
+                    )
+            parent.agent_outputs["dev"] = "\n\n".join(aggregated)
+            await self.task_store.update(parent)
+
+            # Transition parent ACTIVE → REVIEW, spawn reviewer
+            await self.task_store.update_status(
+                parent_id, TaskStatus.REVIEW,
+                event_by="orchestrator",
+                event_detail="all sub-tasks done, campaign review",
+            )
+            await self._spawn_reviewer(parent)
+        else:
+            # No campaign review — complete the parent
+            await self.task_store.update_status(
+                parent_id, TaskStatus.REVIEW,
+                event_by="orchestrator",
+                event_detail="all sub-tasks completed",
+            )
+            await self.task_store.update_status(
+                parent_id, TaskStatus.DONE,
+                event_by="orchestrator",
+                event_detail="all sub-tasks done",
             )
 
     async def _on_task_failed(self, msg: Message) -> None:
@@ -356,10 +651,33 @@ class EventBus:
 
         Routes based on source_role:
         - PM checkpoint + architect enabled → spawn Architect
+        - Reviewer checkpoint → REVIEW → DONE, handle subtask
         - Otherwise → dispatch sub-tasks
         """
         task = await self.task_store.get(task_id)
-        if not task or not task.subtask_ids:
+        if not task:
+            return
+
+        if source_role == "reviewer":
+            # Reviewer checkpoint approved — task is now
+            # ACTIVE (unblocked by checkpoint_manager).
+            # Transition ACTIVE → REVIEW → DONE
+            await self.task_store.update_status(
+                task_id, TaskStatus.REVIEW,
+                event_by="user",
+                event_detail="reviewer checkpoint approved",
+            )
+            await self.task_store.update_status(
+                task_id, TaskStatus.DONE,
+                event_by="user",
+                event_detail="approved after review",
+            )
+            task = await self.task_store.get(task_id)
+            if task:
+                await self._handle_subtask_done(task)
+            return
+
+        if not task.subtask_ids:
             return
 
         architect_enabled = (
@@ -397,10 +715,48 @@ class EventBus:
     ) -> None:
         """Hook called when a checkpoint is rejected.
 
-        Cleans up sub-tasks and fails the parent.
+        Routes based on source_role:
+        - Reviewer checkpoint → ACTIVE → REVIEW → REJECTED,
+          fail parent if applicable
+        - PM/Architect → clean up sub-tasks, fail parent
         """
         task = await self.task_store.get(task_id)
-        if task and task.subtask_ids:
+        if task is None:
+            return
+
+        if source_role == "reviewer":
+            # Reviewer checkpoint rejected — task is now
+            # ACTIVE (unblocked by checkpoint_manager).
+            # Transition ACTIVE → REVIEW → REJECTED
+            await self.task_store.update_status(
+                task_id, TaskStatus.REVIEW,
+                event_by="user",
+                event_detail="reviewer checkpoint rejected",
+            )
+            await self.task_store.update_status(
+                task_id, TaskStatus.REJECTED,
+                event_by="user",
+                event_detail="rejected after review",
+            )
+            # If this is a sub-task, fail the parent too
+            if task.parent_id:
+                parent = await self.task_store.get(task.parent_id)
+                if parent and parent.status == TaskStatus.ACTIVE:
+                    await self.task_store.update_status(
+                        parent.id, TaskStatus.REVIEW,
+                        event_by="orchestrator",
+                        event_detail=(
+                            f"sub-task {task.id} review rejected"
+                        ),
+                    )
+                    await self.task_store.update_status(
+                        parent.id, TaskStatus.REJECTED,
+                        event_by="orchestrator",
+                        event_detail="sub-task review failure",
+                    )
+            return
+
+        if task.subtask_ids:
             await self.dispatcher.cleanup_subtasks(task_id)
 
         detail = (
@@ -410,7 +766,7 @@ class EventBus:
         )
 
         # Transition parent ACTIVE -> REVIEW -> REJECTED
-        if task and task.status == TaskStatus.ACTIVE:
+        if task.status == TaskStatus.ACTIVE:
             await self.task_store.update_status(
                 task_id, TaskStatus.REVIEW,
                 event_by="user",

@@ -30,8 +30,8 @@ class AgentSpawner:
         timeout = self.settings.agent.timeout
         max_turns = self.settings.agent.max_turns
 
-        # PM and Architect agents get tighter limits — they plan, not code
-        if role in (AgentRole.PM, AgentRole.ARCHITECT):
+        # PM, Architect, and Reviewer agents get tighter limits — they plan/review, not code
+        if role in (AgentRole.PM, AgentRole.ARCHITECT, AgentRole.REVIEWER):
             timeout = min(timeout, 300)
             max_turns = min(max_turns, 30)
 

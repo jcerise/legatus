@@ -6,6 +6,7 @@ from legatus.models.config import (
     Mem0Config,
     OrchestratorConfig,
     RedisConfig,
+    ReviewMode,
 )
 from legatus.models.messages import Message, MessageType
 from legatus.models.task import CheckpointRef, Task, TaskEvent, TaskStatus, TaskType
@@ -24,6 +25,7 @@ __all__ = [
     "MessageType",
     "OrchestratorConfig",
     "RedisConfig",
+    "ReviewMode",
     "Task",
     "TaskEvent",
     "TaskStatus",

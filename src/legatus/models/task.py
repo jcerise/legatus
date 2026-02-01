@@ -20,7 +20,7 @@ VALID_TRANSITIONS: dict[TaskStatus, list[TaskStatus]] = {
     TaskStatus.PLANNED: [TaskStatus.ACTIVE],
     TaskStatus.ACTIVE: [TaskStatus.REVIEW, TaskStatus.BLOCKED],
     TaskStatus.BLOCKED: [TaskStatus.ACTIVE],
-    TaskStatus.REVIEW: [TaskStatus.DONE, TaskStatus.REJECTED],
+    TaskStatus.REVIEW: [TaskStatus.DONE, TaskStatus.REJECTED, TaskStatus.BLOCKED],
     TaskStatus.REJECTED: [TaskStatus.PLANNED],
 }
 
