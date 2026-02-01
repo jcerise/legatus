@@ -60,8 +60,10 @@ async def approve_checkpoint(
             detail=f"Checkpoint {checkpoint_id} not found",
         )
 
-    # Trigger sub-task dispatch if applicable
-    await event_bus.on_checkpoint_approved(cp.task_id)
+    # Trigger sub-task dispatch or architect review
+    await event_bus.on_checkpoint_approved(
+        cp.task_id, source_role=cp.source_role,
+    )
 
     return cp
 
@@ -82,6 +84,8 @@ async def reject_checkpoint(
         )
 
     # Clean up sub-tasks and fail the parent
-    await event_bus.on_checkpoint_rejected(cp.task_id)
+    await event_bus.on_checkpoint_rejected(
+        cp.task_id, source_role=cp.source_role,
+    )
 
     return cp

@@ -21,6 +21,7 @@ class AgentConfig(BaseModel):
     max_turns: int = 50
     network: str = "legatus_default"
     host_workspace_path: str = ""
+    architect_review: bool = True
 
 
 class LegatusSettings(BaseSettings):

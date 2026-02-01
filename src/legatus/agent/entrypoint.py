@@ -151,10 +151,116 @@ def build_pm_prompt(task: Task, memory_context: str) -> str:
     return "\n".join(parts)
 
 
+def build_architect_prompt(task: Task, memory_context: str) -> str:
+    """Construct the prompt for an architect agent."""
+    parts = [
+        "# Role: Software Architect (praefectus castrorum)",
+        "",
+        "You are the Architect agent in a multi-agent software"
+        " engineering system. Your role is to review a PM's task"
+        " decomposition plan, examine the workspace, and produce"
+        " architectural design decisions that will guide the dev"
+        " agents during implementation.",
+        "",
+        "## Campaign Overview",
+        f"**Title**: {task.title}",
+        "",
+        task.description,
+        "",
+    ]
+
+    if task.acceptance_criteria:
+        parts.append("## Acceptance Criteria")
+        for criterion in task.acceptance_criteria:
+            parts.append(f"- {criterion}")
+        parts.append("")
+
+    # Include the PM's plan if available
+    pm_output = task.agent_outputs.get("pm", "")
+    if pm_output:
+        parts.append("## PM Decomposition Plan")
+        parts.append(pm_output)
+        parts.append("")
+
+    # Include sub-task summary if available
+    if task.subtask_ids:
+        parts.append("## Sub-tasks (from PM)")
+        parts.append(
+            "The following sub-tasks have been defined and will"
+            " be executed sequentially by dev agents:"
+        )
+        parts.append("")
+
+    if memory_context:
+        parts.append("## Relevant Context from Memory")
+        parts.append(memory_context)
+        parts.append("")
+
+    parts.extend([
+        "## Instructions",
+        "",
+        "1. **Explore the workspace** at /workspace to understand"
+        " the existing codebase: structure, patterns, frameworks,"
+        " and conventions.",
+        "",
+        "2. **Review the PM's plan** and assess whether the"
+        " proposed decomposition is architecturally sound.",
+        "",
+        "3. **Produce design decisions** covering:",
+        "   - Module structure and component boundaries",
+        "   - Interface definitions between components",
+        "   - Framework/library/pattern choices",
+        "   - Data models and API contracts",
+        "   - Any concerns or risks with the approach",
+        "",
+        "4. **Output your design** as a JSON block in the format"
+        " below. You MUST include this JSON block in your"
+        " response, wrapped in ```json``` fences:",
+        "",
+        "```json",
+        "{",
+        '  "decisions": [',
+        "    {",
+        '      "title": "Decision title",',
+        '      "rationale": "Why this approach",',
+        '      "alternatives_considered": ["Alt 1", "Alt 2"]',
+        "    }",
+        "  ],",
+        '  "interfaces": [',
+        "    {",
+        '      "module": "Module or component name",',
+        '      "definition": "Interface description, key'
+        ' functions/methods, data contracts"',
+        "    }",
+        "  ],",
+        '  "concerns": [',
+        '    "Any risks, trade-offs, or issues to flag"',
+        "  ],",
+        '  "design_notes": "Free-form architectural notes'
+        ' and guidance for dev agents"',
+        "}",
+        "```",
+        "",
+        "## Guidelines",
+        "- Focus on decisions that will guide the dev agents."
+        " Be specific about interfaces, data shapes, and patterns.",
+        "- If the PM's decomposition has issues, note them in"
+        " your concerns. The user can reject the plan if needed.",
+        "- Reference existing code patterns from the workspace"
+        " when recommending approaches.",
+        "- Do NOT implement any features. Design and document"
+        " only. You are planning, not coding.",
+    ])
+
+    return "\n".join(parts)
+
+
 def build_prompt(task: Task, memory_context: str, role: str) -> str:
     """Dispatch to the appropriate prompt builder based on role."""
     if role == "pm":
         return build_pm_prompt(task, memory_context)
+    if role == "architect":
+        return build_architect_prompt(task, memory_context)
     return build_dev_prompt(task, memory_context)
 
 
@@ -212,8 +318,8 @@ async def run_agent() -> None:
         # 5. Report result
         if result["success"]:
             await reporter.report_complete(result)
-            # 6. Extract memories (dev agents only — PM doesn't write code)
-            if agent_role != "pm":
+            # 6. Extract memories (dev agents only — PM/architect don't write code)
+            if agent_role not in ("pm", "architect"):
                 await memory_bridge.extract_learnings(task, result)
             logger.info("Task %s completed successfully", task_id)
         else:

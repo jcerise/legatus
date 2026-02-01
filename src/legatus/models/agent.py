@@ -7,6 +7,7 @@ from pydantic import BaseModel
 class AgentRole(StrEnum):
     DEV = "dev"
     PM = "pm"
+    ARCHITECT = "architect"
 
 
 class AgentStatus(StrEnum):

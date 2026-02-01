@@ -21,3 +21,4 @@ class Checkpoint(BaseModel):
     resolved_at: datetime | None = None
     resolved_by: str | None = None
     rejection_reason: str | None = None
+    source_role: str | None = None

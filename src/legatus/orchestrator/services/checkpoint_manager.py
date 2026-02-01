@@ -24,9 +24,15 @@ class CheckpointManager:
         task_id: str,
         title: str,
         description: str,
+        source_role: str | None = None,
     ) -> Checkpoint:
         """Create a checkpoint and block its associated task."""
-        cp = Checkpoint(task_id=task_id, title=title, description=description)
+        cp = Checkpoint(
+            task_id=task_id,
+            title=title,
+            description=description,
+            source_role=source_role,
+        )
 
         r = self._redis.client
         await r.set(self._key(cp.id), cp.model_dump_json())

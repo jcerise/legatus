@@ -1,4 +1,5 @@
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 STATUS_ICONS = {
@@ -33,15 +34,46 @@ def render_status_panel(
         for cp in checkpoints:
             cp_id = cp.get("id", "?")
             title = cp.get("title", "Checkpoint")
-            console.print(
-                f"[bold yellow]>>> Awaiting approval:[/bold yellow]"
-                f" {title}"
-            )
-            console.print(
-                f"    [bold]legion approve[/bold]  or"
+            source = cp.get("source_role", "")
+            description = cp.get("description", "")
+
+            # Role badge
+            role_badge = ""
+            if source == "architect":
+                role_badge = "[bold magenta][Architect][/bold magenta] "
+            elif source == "pm":
+                role_badge = "[bold blue][PM][/bold blue] "
+
+            # Build checkpoint content
+            lines = [
+                f"{role_badge}[bold yellow]{title}[/bold yellow]",
+            ]
+
+            # Show description (truncated for readability)
+            if description:
+                desc_lines = description.strip().splitlines()
+                # Show up to 20 lines of the description
+                for line in desc_lines[:20]:
+                    lines.append(f"  {line}")
+                if len(desc_lines) > 20:
+                    lines.append(
+                        f"  [dim]... ({len(desc_lines) - 20}"
+                        f" more lines)[/dim]"
+                    )
+
+            lines.append("")
+            lines.append(
+                f"  [bold]legion approve[/bold]  or"
                 f"  [bold]legion reject {cp_id}"
                 f' "reason"[/bold]'
             )
+
+            console.print(Panel(
+                "\n".join(lines),
+                title="Awaiting Approval",
+                title_align="left",
+                border_style="yellow",
+            ))
             console.print()
 
     # Agents

@@ -3,8 +3,11 @@
 import logging
 
 from legatus.models.agent import AgentRole
-from legatus.models.task import TaskStatus
+from legatus.models.task import Task, TaskStatus
 from legatus.orchestrator.services.agent_spawner import AgentSpawner
+from legatus.orchestrator.services.architect_parser import (
+    parse_architect_output,
+)
 from legatus.redis_client.state import StateStore
 from legatus.redis_client.task_store import TaskStore
 
@@ -49,6 +52,14 @@ class TaskDispatcher:
 
             if not deps_met:
                 continue
+
+            # Inject architect context into sub-task if available
+            architect_ctx = _format_architect_context(parent)
+            if architect_ctx:
+                child.description = (
+                    child.description + architect_ctx
+                )
+                await self.task_store.update(child)
 
             # Dispatch this child
             try:
@@ -195,3 +206,55 @@ class TaskDispatcher:
                     event_by="orchestrator",
                     event_detail="parent plan rejected by user",
                 )
+
+
+def _format_architect_context(parent: Task) -> str | None:
+    """Format the architect's parsed design as guidance for DEV agents.
+
+    Returns a markdown section to append to the sub-task description,
+    or None if no architect output exists.
+    """
+    raw = parent.agent_outputs.get("architect")
+    if not raw:
+        return None
+
+    plan = parse_architect_output(raw)
+    if plan is None:
+        # Fallback: couldn't parse, skip rather than inject garbage
+        return None
+
+    lines = [
+        "\n\n## Architecture Guidance",
+        "The following design decisions were approved by the"
+        " Architect. Follow these guidelines during implementation.",
+        "",
+    ]
+
+    if plan.decisions:
+        lines.append("### Design Decisions")
+        for d in plan.decisions:
+            title = d.get("title", "Untitled")
+            rationale = d.get("rationale", "")
+            lines.append(f"- **{title}**: {rationale}")
+        lines.append("")
+
+    if plan.interfaces:
+        lines.append("### Interfaces")
+        for iface in plan.interfaces:
+            module = iface.get("module", "?")
+            defn = iface.get("definition", "")
+            lines.append(f"- **{module}**: {defn}")
+        lines.append("")
+
+    if plan.concerns:
+        lines.append("### Concerns")
+        for c in plan.concerns:
+            lines.append(f"- {c}")
+        lines.append("")
+
+    if plan.design_notes:
+        lines.append("### Additional Notes")
+        lines.append(plan.design_notes)
+        lines.append("")
+
+    return "\n".join(lines)

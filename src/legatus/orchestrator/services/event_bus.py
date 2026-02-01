@@ -4,9 +4,13 @@ import logging
 from fastapi import WebSocket
 
 from legatus.models.agent import AgentRole, AgentStatus
+from legatus.models.config import LegatusSettings
 from legatus.models.messages import Message, MessageType
 from legatus.models.task import Task, TaskEvent, TaskStatus
 from legatus.orchestrator.services.agent_spawner import AgentSpawner
+from legatus.orchestrator.services.architect_parser import (
+    parse_architect_output,
+)
 from legatus.orchestrator.services.checkpoint_manager import (
     CheckpointManager,
 )
@@ -33,6 +37,7 @@ class EventBus:
         workspace_path: str,
         spawner: AgentSpawner,
         redis_client: RedisClient,
+        settings: LegatusSettings | None = None,
     ):
         self.task_manager = TaskManager(task_store)
         self.task_store = task_store
@@ -40,6 +45,7 @@ class EventBus:
         self.pubsub = pubsub
         self.git_ops = GitOps(workspace_path)
         self.spawner = spawner
+        self.settings = settings
         self.checkpoint_manager = CheckpointManager(
             redis_client, task_store,
         )
@@ -101,10 +107,13 @@ class EventBus:
             agent_info.role if agent_info else AgentRole.DEV
         )
 
-        if agent_role == AgentRole.PM:
-            await self._on_pm_complete(msg)
-        else:
-            await self._on_dev_complete(msg)
+        match agent_role:
+            case AgentRole.PM:
+                await self._on_pm_complete(msg)
+            case AgentRole.ARCHITECT:
+                await self._on_architect_complete(msg)
+            case _:
+                await self._on_dev_complete(msg)
 
         # Clean up agent container regardless of role
         await self._cleanup_agent(msg.agent_id)
@@ -132,6 +141,10 @@ class EventBus:
         parent = await self.task_store.get(task_id)
         if parent is None:
             return
+
+        # Store raw PM output for downstream agents (architect)
+        parent.agent_outputs["pm"] = output
+        await self.task_store.update(parent)
 
         # Create child tasks in order, chaining depends_on
         child_ids: list[str] = []
@@ -196,11 +209,88 @@ class EventBus:
             task_id=task_id,
             title=f"Approve plan: {parent.title}",
             description="\n".join(desc_lines),
+            source_role="pm",
         )
 
         logger.info(
             "PM plan for task %s: %d sub-tasks, checkpoint created",
             task_id, len(child_ids),
+        )
+
+    async def _on_architect_complete(self, msg: Message) -> None:
+        """Handle Architect agent completion: parse design,
+        store output, create checkpoint for user approval."""
+        task_id = msg.task_id
+        output = msg.data.get("output", "")
+
+        task = await self.task_store.get(task_id)
+        if task is None:
+            return
+
+        # Store raw architect output on the task
+        task.agent_outputs["architect"] = output
+        await self.task_store.update(task)
+
+        # Parse output (best-effort — architect is advisory)
+        plan = parse_architect_output(output)
+
+        # Build checkpoint description
+        desc_lines = [
+            f"Architect reviewed '{task.title}':",
+            "",
+        ]
+
+        if plan:
+            if plan.decisions:
+                desc_lines.append("**Design Decisions:**")
+                for d in plan.decisions:
+                    title = d.get("title", "Untitled")
+                    rationale = d.get("rationale", "")
+                    desc_lines.append(
+                        f"- **{title}**: {rationale[:200]}"
+                    )
+                desc_lines.append("")
+
+            if plan.interfaces:
+                desc_lines.append("**Interfaces:**")
+                for iface in plan.interfaces:
+                    module = iface.get("module", "?")
+                    defn = iface.get(
+                        "definition", "",
+                    )[:200]
+                    desc_lines.append(
+                        f"- **{module}**: {defn}"
+                    )
+                desc_lines.append("")
+
+            if plan.concerns:
+                desc_lines.append("**Concerns:**")
+                for c in plan.concerns:
+                    desc_lines.append(f"- {c}")
+                desc_lines.append("")
+
+            if plan.design_notes:
+                desc_lines.append("**Notes:**")
+                desc_lines.append(plan.design_notes[:500])
+                desc_lines.append("")
+        else:
+            desc_lines.append(
+                "*(Architect output could not be parsed"
+                " as structured JSON. Raw output stored"
+                " on task.)*"
+            )
+            desc_lines.append("")
+
+        await self.checkpoint_manager.create(
+            task_id=task_id,
+            title=f"Approve design: {task.title}",
+            description="\n".join(desc_lines),
+            source_role="architect",
+        )
+
+        logger.info(
+            "Architect design for task %s: checkpoint created",
+            task_id,
         )
 
     async def _on_dev_complete(self, msg: Message) -> None:
@@ -257,16 +347,54 @@ class EventBus:
         if msg.agent_id:
             await self._cleanup_agent(msg.agent_id)
 
-    async def on_checkpoint_approved(self, task_id: str) -> None:
+    async def on_checkpoint_approved(
+        self,
+        task_id: str,
+        source_role: str | None = None,
+    ) -> None:
         """Hook called when a checkpoint is approved.
 
-        Starts sub-task dispatch if the task has sub-tasks.
+        Routes based on source_role:
+        - PM checkpoint + architect enabled → spawn Architect
+        - Otherwise → dispatch sub-tasks
         """
         task = await self.task_store.get(task_id)
-        if task and task.subtask_ids:
+        if not task or not task.subtask_ids:
+            return
+
+        architect_enabled = (
+            self.settings.agent.architect_review
+            if self.settings
+            else True
+        )
+
+        if source_role == "pm" and architect_enabled:
+            # Spawn architect agent to review the plan
+            try:
+                agent_info = self.spawner.spawn_agent(
+                    task, AgentRole.ARCHITECT,
+                )
+                await self.state_store.set_agent_info(agent_info)
+                logger.info(
+                    "Spawned architect agent %s for task %s",
+                    agent_info.id, task_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to spawn architect for task %s,"
+                    " proceeding to dispatch",
+                    task_id,
+                )
+                await self.dispatcher.dispatch_next(task_id)
+        else:
+            # Architect already approved, or disabled — dispatch
             await self.dispatcher.dispatch_next(task_id)
 
-    async def on_checkpoint_rejected(self, task_id: str) -> None:
+    async def on_checkpoint_rejected(
+        self,
+        task_id: str,
+        source_role: str | None = None,
+    ) -> None:
         """Hook called when a checkpoint is rejected.
 
         Cleans up sub-tasks and fails the parent.
@@ -275,17 +403,23 @@ class EventBus:
         if task and task.subtask_ids:
             await self.dispatcher.cleanup_subtasks(task_id)
 
+        detail = (
+            "design rejected by user"
+            if source_role == "architect"
+            else "plan rejected by user"
+        )
+
         # Transition parent ACTIVE -> REVIEW -> REJECTED
         if task and task.status == TaskStatus.ACTIVE:
             await self.task_store.update_status(
                 task_id, TaskStatus.REVIEW,
                 event_by="user",
-                event_detail="plan rejected by user",
+                event_detail=detail,
             )
             await self.task_store.update_status(
                 task_id, TaskStatus.REJECTED,
                 event_by="user",
-                event_detail="plan rejected by user",
+                event_detail=detail,
             )
 
     async def _update_agent_status(self, msg: Message) -> None:
