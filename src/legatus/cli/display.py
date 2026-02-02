@@ -7,6 +7,7 @@ STATUS_ICONS = {
     "planned": "[.]",
     "active": "[>]",
     "review": "[?]",
+    "testing": "[T]",
     "blocked": "[!]",
     "rejected": "[x]",
     "done": "[v]",
@@ -45,6 +46,8 @@ def render_status_panel(
                 role_badge = "[bold blue][PM][/bold blue] "
             elif source == "reviewer":
                 role_badge = "[bold green][Reviewer][/bold green] "
+            elif source == "qa":
+                role_badge = "[bold cyan][QA][/bold cyan] "
 
             # Build checkpoint content
             lines = [
@@ -58,24 +61,21 @@ def render_status_panel(
                 for line in desc_lines[:20]:
                     lines.append(f"  {line}")
                 if len(desc_lines) > 20:
-                    lines.append(
-                        f"  [dim]... ({len(desc_lines) - 20}"
-                        f" more lines)[/dim]"
-                    )
+                    lines.append(f"  [dim]... ({len(desc_lines) - 20} more lines)[/dim]")
 
             lines.append("")
             lines.append(
-                f"  [bold]legion approve[/bold]  or"
-                f"  [bold]legion reject {cp_id}"
-                f' "reason"[/bold]'
+                f'  [bold]legion approve[/bold]  or  [bold]legion reject {cp_id} "reason"[/bold]'
             )
 
-            console.print(Panel(
-                "\n".join(lines),
-                title="Awaiting Approval",
-                title_align="left",
-                border_style="yellow",
-            ))
+            console.print(
+                Panel(
+                    "\n".join(lines),
+                    title="Awaiting Approval",
+                    title_align="left",
+                    border_style="yellow",
+                )
+            )
             console.print()
 
     # Agents

@@ -5,6 +5,7 @@ from legatus.models.config import (
     LegatusSettings,
     Mem0Config,
     OrchestratorConfig,
+    QAMode,
     RedisConfig,
     ReviewMode,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "Message",
     "MessageType",
     "OrchestratorConfig",
+    "QAMode",
     "RedisConfig",
     "ReviewMode",
     "Task",

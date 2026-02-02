@@ -10,6 +10,7 @@ class TaskStatus(StrEnum):
     PLANNED = "planned"
     ACTIVE = "active"
     REVIEW = "review"
+    TESTING = "testing"
     BLOCKED = "blocked"
     REJECTED = "rejected"
     DONE = "done"
@@ -18,9 +19,15 @@ class TaskStatus(StrEnum):
 VALID_TRANSITIONS: dict[TaskStatus, list[TaskStatus]] = {
     TaskStatus.CREATED: [TaskStatus.PLANNED],
     TaskStatus.PLANNED: [TaskStatus.ACTIVE],
-    TaskStatus.ACTIVE: [TaskStatus.REVIEW, TaskStatus.BLOCKED],
+    TaskStatus.ACTIVE: [TaskStatus.REVIEW, TaskStatus.BLOCKED, TaskStatus.TESTING],
     TaskStatus.BLOCKED: [TaskStatus.ACTIVE],
-    TaskStatus.REVIEW: [TaskStatus.DONE, TaskStatus.REJECTED, TaskStatus.BLOCKED],
+    TaskStatus.REVIEW: [
+        TaskStatus.DONE,
+        TaskStatus.REJECTED,
+        TaskStatus.BLOCKED,
+        TaskStatus.TESTING,
+    ],
+    TaskStatus.TESTING: [TaskStatus.DONE, TaskStatus.REJECTED, TaskStatus.BLOCKED],
     TaskStatus.REJECTED: [TaskStatus.PLANNED],
 }
 

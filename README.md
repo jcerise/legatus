@@ -2,7 +2,7 @@
 
 A command-and-control system for software engineering agents. Legatus deploys autonomous AI agents as ephemeral operatives, coordinated through a central command structure, to execute engineering campaigns against your codebase.
 
-In the Roman legion, the *legatus legionis* commanded thousands from a single seat of authority. This system operates on the same principle: one orchestrator dispatches agents, tracks their campaigns, and consolidates their conquests into your repository. A *praefectus* (PM agent) surveys the terrain and decomposes orders into tactical objectives. The *praefectus castrorum* (Architect agent) then reviews the battle plan and issues design edicts -- fortification specifications, supply line definitions, and structural doctrine -- before any ground is broken. Only once the commander approves both the strategy and the engineering plan are the *milites* (dev agents) dispatched sequentially to execute each objective. After each operative completes their work, the *optio* (Reviewer agent) inspects the results -- flagging defects for rework and escalating security concerns to the commander before the campaign advances.
+In the Roman legion, the *legatus legionis* commanded thousands from a single seat of authority. This system operates on the same principle: one orchestrator dispatches agents, tracks their campaigns, and consolidates their conquests into your repository. A *praefectus* (PM agent) surveys the terrain and decomposes orders into tactical objectives. The *praefectus castrorum* (Architect agent) then reviews the battle plan and issues design edicts -- fortification specifications, supply line definitions, and structural doctrine -- before any ground is broken. Only once the commander approves both the strategy and the engineering plan are the *milites* (dev agents) dispatched sequentially to execute each objective. After each operative completes their work, the *optio* (Reviewer agent) inspects the results -- flagging defects for rework and escalating security concerns to the commander. Finally, the *tesserarius* (QA agent) writes and runs tests against the completed work, sending failed objectives back through the ranks before the campaign advances.
 
 ## Architecture
 
@@ -23,6 +23,7 @@ In the Roman legion, the *legatus legionis* commanded thousands from a single se
 - **Architect Agent (*praefectus castrorum*)** -- Reviews the battle plan and the terrain, then issues design edicts: architectural decisions, interface contracts, and structural guidance. Dev agents carry these edicts as standing orders during execution. Requires the commander's approval before operations commence
 - **Dev Agents (*milites*)** -- Ephemeral Docker containers, each running Claude Code against the workspace. Deployed on command, destroyed on completion. Execute one objective at a time, guided by the Architect's doctrine
 - **Reviewer Agent (*optio*)** -- Inspects each operative's work after completion. Reviews code changes for correctness, security, style, and performance. Rejects substandard work back to the dev agent for a second attempt, and escalates security concerns directly to the commander via checkpoint. Configurable per-subtask or per-campaign
+- **QA Agent (*tesserarius*)** -- Writes and runs tests against completed work. Examines the workspace, identifies the test framework, and produces test suites that verify acceptance criteria. Failed tests send the objective back to the dev agent with detailed failure reports. If the operative fails a second time, the *tesserarius* escalates to the commander. Configurable per-subtask or per-campaign, independent of the *optio*
 - **Redis** -- State store and courier system. Task records, agent status, and pub/sub messaging between all components
 - **Mem0** -- Long-term intelligence. Agents store and retrieve institutional knowledge across campaigns
 - **CLI (`legion`)** -- Your interface to issue orders and observe the field
@@ -117,10 +118,16 @@ Campaign order
      |                    rejects defects back to the operative (once),
      |                    escalates security concerns to the commander
      v
+ tesserarius (QA) -----> writes and runs tests against the work
+     |                    sends failures back through the full chain,
+     |                    escalates to the commander after one retry
+     v
  Campaign complete
 ```
 
 The `--direct` flag bypasses both the *praefectus* and the *praefectus castrorum*, sending a lone operative straight to the front line. The Architect can be disabled via configuration (`LEGATUS_AGENT__ARCHITECT_REVIEW=false`) for campaigns where strategic planning suffices without engineering doctrine. The *optio* is enabled separately (`LEGATUS_AGENT__REVIEWER_ENABLED=true`) and can operate in two modes: `per_subtask` (default, reviews each objective as it completes) or `per_campaign` (reviews all work once every objective is done). The *optio* grants one chance for the operative to correct rejected work before escalating to the commander.
+
+The *tesserarius* is enabled independently (`LEGATUS_AGENT__QA_ENABLED=true`) and slots after the *optio* in the chain. When both are active, each objective passes through review then testing before the campaign advances. The *tesserarius* also operates in `per_subtask` (default) or `per_campaign` mode (`LEGATUS_AGENT__QA_MODE=per_campaign`). On test failure, the objective is sent back to the operative for one retry -- the full chain (review, then QA) runs again since the code has changed. A second failure escalates to the commander with test results and failure details.
 
 ## Current Disposition
 
@@ -132,8 +139,9 @@ The `--direct` flag bypasses both the *praefectus* and the *praefectus castrorum
 
 **Phase 2.5** -- the *optio* has joined the ranks. After each dev agent completes an objective, the Reviewer inspects the code changes for correctness, security, style, and performance. Defective work is sent back to the operative with feedback for one retry. Security vulnerabilities are escalated to the commander regardless of verdict. The *optio* can review per-subtask (after each operative) or per-campaign (once all objectives are complete).
 
+**Phase 2.6** -- the *tesserarius* has been posted. After each objective clears review (or directly after the dev agent if the *optio* is not deployed), the QA agent writes and executes tests against the completed work. Test failures are fed back to the operative as detailed failure reports, and the full pipeline runs again on the corrected code. A second failure escalates to the commander with test results and failure details. The *tesserarius* can test per-subtask or per-campaign, configured independently from the *optio*.
+
 The following campaigns remain:
 
 - Parallel agent operations (branch-per-agent, orchestrator-managed merges)
-- QA agent (*tesserarius*) -- automated test generation and verification
 - Agent container hardening (error recovery, resource limits)

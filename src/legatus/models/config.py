@@ -9,6 +9,11 @@ class ReviewMode(StrEnum):
     PER_CAMPAIGN = "per_campaign"
 
 
+class QAMode(StrEnum):
+    PER_SUBTASK = "per_subtask"
+    PER_CAMPAIGN = "per_campaign"
+
+
 class RedisConfig(BaseModel):
     url: str = "redis://localhost:6379"
 
@@ -32,6 +37,9 @@ class AgentConfig(BaseModel):
     reviewer_enabled: bool = False
     review_mode: ReviewMode = ReviewMode.PER_SUBTASK
     reviewer_max_retries: int = 1
+    qa_enabled: bool = False
+    qa_mode: QAMode = QAMode.PER_SUBTASK
+    qa_max_retries: int = 1
 
 
 class LegatusSettings(BaseSettings):
