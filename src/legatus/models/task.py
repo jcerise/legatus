@@ -73,5 +73,6 @@ class Task(BaseModel):
     project: str | None = None
     prompt: str | None = None
     agent_outputs: dict[str, str] = Field(default_factory=dict)
+    branch_name: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

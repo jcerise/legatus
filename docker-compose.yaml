@@ -10,6 +10,7 @@ services:
       - "8420:8420"
     volumes:
       - ${WORKSPACE}:/workspace
+      - ${WORKSPACE_WORKTREES:-./workspace-worktrees}:/workspace-worktrees
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - LEGATUS_REDIS__URL=redis://redis:6379
@@ -26,6 +27,9 @@ services:
       - LEGATUS_AGENT__QA_ENABLED=${LEGATUS_AGENT__QA_ENABLED:-false}
       - LEGATUS_AGENT__QA_MODE=${LEGATUS_AGENT__QA_MODE:-per_subtask}
       - LEGATUS_AGENT__QA_MAX_RETRIES=${LEGATUS_AGENT__QA_MAX_RETRIES:-1}
+      - LEGATUS_AGENT__PARALLEL_ENABLED=${LEGATUS_AGENT__PARALLEL_ENABLED:-false}
+      - LEGATUS_AGENT__HOST_WORKTREE_BASE=${WORKSPACE_WORKTREES:-./workspace-worktrees}
+      - LEGATUS_AGENT__WORKTREE_BASE=/workspace-worktrees
     depends_on:
       redis:
         condition: service_healthy

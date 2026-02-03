@@ -14,6 +14,7 @@ class SubTaskPlan:
     description: str
     acceptance_criteria: list[str] = field(default_factory=list)
     estimated_complexity: str = "medium"
+    depends_on: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -98,6 +99,13 @@ def _validate_plan(data: dict) -> PMPlan | None:
                 "Subtask %d missing title or description, skipping", i
             )
             continue
+        raw_deps = st.get("depends_on", [])
+        deps = []
+        if isinstance(raw_deps, list):
+            for d in raw_deps:
+                if isinstance(d, int) and 0 <= d < i:
+                    deps.append(d)
+
         subtasks.append(SubTaskPlan(
             title=title,
             description=description,
@@ -105,6 +113,7 @@ def _validate_plan(data: dict) -> PMPlan | None:
             estimated_complexity=st.get(
                 "estimated_complexity", "medium"
             ),
+            depends_on=deps,
         ))
 
     if not subtasks:

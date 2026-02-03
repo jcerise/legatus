@@ -75,7 +75,11 @@ def build_dev_prompt(task: Task, memory_context: str) -> str:
     return "\n".join(parts)
 
 
-def build_pm_prompt(task: Task, memory_context: str) -> str:
+def build_pm_prompt(
+    task: Task,
+    memory_context: str,
+    parallel_enabled: bool = False,
+) -> str:
     """Construct the prompt for a PM (planning) agent."""
     parts = [
         "# Role: Product Manager / Technical Planner",
@@ -112,45 +116,109 @@ def build_pm_prompt(task: Task, memory_context: str) -> str:
             "   - Existing patterns and conventions",
             "   - Files that will likely need changes",
             "",
-            "2. **Decompose the feature** into 2-7 sequential sub-tasks.",
-            "   Each sub-task should be a self-contained unit of work"
-            " that a dev agent can implement independently (given prior"
-            " sub-tasks are complete).",
-            "",
-            "3. **Order matters**: Sub-tasks execute sequentially. Earlier"
-            " tasks may create files or APIs that later tasks depend on.",
-            "",
-            "4. **Output your plan** as a JSON block in the format below.",
-            "   You MUST include this JSON block in your response, wrapped in ```json``` fences:",
-            "",
-            "```json",
-            "{",
-            '  "analysis": "Brief analysis of the feature and approach",',
-            '  "subtasks": [',
-            "    {",
-            '      "title": "Short title for the sub-task",',
-            '      "description": "Detailed implementation instructions'
-            " for the dev agent. Include file paths and function names"
-            ' when possible.",',
-            '      "acceptance_criteria": ["Criterion 1", "Criterion 2"],',
-            '      "estimated_complexity": "low|medium|high"',
-            "    }",
-            "  ]",
-            "}",
-            "```",
-            "",
-            "## Guidelines",
-            "- Each sub-task description should be detailed enough for a"
-            " dev agent to implement without additional context.",
-            "- Include file paths and function names when you can identify"
-            " them from the workspace.",
-            "- If a sub-task depends on files created by a prior sub-task,"
-            " mention that explicitly in the description.",
-            "- Do NOT make any file changes. You are planning only.",
-            "- Keep the number of sub-tasks reasonable (2-7). Prefer"
-            " fewer, larger sub-tasks over many tiny ones.",
         ]
     )
+
+    if parallel_enabled:
+        parts.extend(
+            [
+                "2. **Decompose the feature** into 2-7 sub-tasks that can"
+                " execute **in parallel** where dependencies allow."
+                " Each sub-task should be a self-contained unit of work"
+                " that a dev agent can implement independently.",
+                "",
+                "3. **Use `depends_on`** to declare ordering constraints."
+                " `depends_on` is an array of 0-based indices referencing"
+                " earlier sub-tasks that must complete first. Tasks without"
+                " `depends_on` (or with an empty array) will run in parallel"
+                " immediately. Only add a dependency if the task truly"
+                " requires output from a prior task.",
+                "",
+                "4. **Output your plan** as a JSON block in the format below.",
+                "   You MUST include this JSON block in your response,"
+                " wrapped in ```json``` fences:",
+                "",
+                "```json",
+                "{",
+                '  "analysis": "Brief analysis of the feature and approach",',
+                '  "subtasks": [',
+                "    {",
+                '      "title": "Short title for the sub-task",',
+                '      "description": "Detailed implementation instructions'
+                " for the dev agent. Include file paths and function names"
+                ' when possible.",',
+                '      "acceptance_criteria": ["Criterion 1", "Criterion 2"],',
+                '      "estimated_complexity": "low|medium|high",',
+                '      "depends_on": []',
+                "    },",
+                "    {",
+                '      "title": "A task that depends on the first",',
+                '      "description": "This task needs the output of task 0.",',
+                '      "acceptance_criteria": ["Criterion 1"],',
+                '      "estimated_complexity": "medium",',
+                '      "depends_on": [0]',
+                "    }",
+                "  ]",
+                "}",
+                "```",
+                "",
+                "## Guidelines",
+                "- Maximize parallelism: only add a dependency when a task"
+                " truly needs another task's output (files, APIs, etc.).",
+                "- Each sub-task description should be detailed enough for a"
+                " dev agent to implement without additional context.",
+                "- Include file paths and function names when you can identify"
+                " them from the workspace.",
+                "- If a sub-task depends on files created by a prior sub-task,"
+                " mention that explicitly in the description and in `depends_on`.",
+                "- Do NOT make any file changes. You are planning only.",
+                "- Keep the number of sub-tasks reasonable (2-7). Prefer"
+                " fewer, larger sub-tasks over many tiny ones.",
+            ]
+        )
+    else:
+        parts.extend(
+            [
+                "2. **Decompose the feature** into 2-7 sequential sub-tasks.",
+                "   Each sub-task should be a self-contained unit of work"
+                " that a dev agent can implement independently (given prior"
+                " sub-tasks are complete).",
+                "",
+                "3. **Order matters**: Sub-tasks execute sequentially. Earlier"
+                " tasks may create files or APIs that later tasks depend on.",
+                "",
+                "4. **Output your plan** as a JSON block in the format below.",
+                "   You MUST include this JSON block in your response,"
+                " wrapped in ```json``` fences:",
+                "",
+                "```json",
+                "{",
+                '  "analysis": "Brief analysis of the feature and approach",',
+                '  "subtasks": [',
+                "    {",
+                '      "title": "Short title for the sub-task",',
+                '      "description": "Detailed implementation instructions'
+                " for the dev agent. Include file paths and function names"
+                ' when possible.",',
+                '      "acceptance_criteria": ["Criterion 1", "Criterion 2"],',
+                '      "estimated_complexity": "low|medium|high"',
+                "    }",
+                "  ]",
+                "}",
+                "```",
+                "",
+                "## Guidelines",
+                "- Each sub-task description should be detailed enough for a"
+                " dev agent to implement without additional context.",
+                "- Include file paths and function names when you can identify"
+                " them from the workspace.",
+                "- If a sub-task depends on files created by a prior sub-task,"
+                " mention that explicitly in the description.",
+                "- Do NOT make any file changes. You are planning only.",
+                "- Keep the number of sub-tasks reasonable (2-7). Prefer"
+                " fewer, larger sub-tasks over many tiny ones.",
+            ]
+        )
 
     return "\n".join(parts)
 
@@ -477,7 +545,8 @@ def build_qa_prompt(task: Task, memory_context: str) -> str:
 def build_prompt(task: Task, memory_context: str, role: str) -> str:
     """Dispatch to the appropriate prompt builder based on role."""
     if role == "pm":
-        return build_pm_prompt(task, memory_context)
+        parallel = os.environ.get("PARALLEL_ENABLED", "") == "1"
+        return build_pm_prompt(task, memory_context, parallel_enabled=parallel)
     if role == "architect":
         return build_architect_prompt(task, memory_context)
     if role == "reviewer":

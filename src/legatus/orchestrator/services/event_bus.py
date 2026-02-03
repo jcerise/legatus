@@ -1,5 +1,7 @@
 import asyncio
+import fnmatch
 import logging
+import os
 
 from fastapi import WebSocket
 
@@ -33,6 +35,37 @@ from legatus.redis_client.task_store import TaskStore
 
 logger = logging.getLogger(__name__)
 
+# File patterns that can be auto-resolved during merge by accepting the
+# incoming (task-branch) version.  Only generated / build artifacts that
+# are never hand-edited should appear here.
+_AUTO_RESOLVE_PATTERNS = [
+    ".coverage",
+    ".coverage.*",
+    "htmlcov/*",
+    "*.pyc",
+    "*.pyo",
+    "__pycache__/*",
+    "*.egg-info/*",
+    "dist/*",
+    "build/*",
+    ".eggs/*",
+    ".pytest_cache/*",
+    ".mypy_cache/*",
+    ".ruff_cache/*",
+    ".tox/*",
+    ".DS_Store",
+    "Thumbs.db",
+    "*.log",
+]
+
+
+def _can_auto_resolve(conflict_files: list[str]) -> bool:
+    """Return True if every conflicted file matches an auto-resolve pattern."""
+    return all(
+        any(fnmatch.fnmatch(f, pat) for pat in _AUTO_RESOLVE_PATTERNS)
+        for f in conflict_files
+    )
+
 
 class EventBus:
     """Listens on Redis pub/sub channels and dispatches events."""
@@ -62,6 +95,8 @@ class EventBus:
             task_store,
             state_store,
             spawner,
+            git_ops=self.git_ops,
+            settings=settings,
         )
         self.ws_connections: list[WebSocket] = []
         self._task: asyncio.Task | None = None
@@ -168,10 +203,26 @@ class EventBus:
         parent.agent_outputs["pm"] = output
         await self.task_store.update(parent)
 
-        # Create child tasks in order, chaining depends_on
+        # Create child tasks in order
+        parallel = (
+            self.settings.agent.parallel_enabled
+            if self.settings else False
+        )
         child_ids: list[str] = []
         prev_child_id: str | None = None
         for i, st in enumerate(plan.subtasks):
+            # Determine dependencies
+            if parallel:
+                # Use PM-specified depends_on indices, converted to task IDs
+                deps = [
+                    child_ids[idx]
+                    for idx in st.depends_on
+                    if idx < len(child_ids)
+                ]
+            else:
+                # Sequential: each task depends on the previous
+                deps = [prev_child_id] if prev_child_id else []
+
             child = Task(
                 title=st.title,
                 description=st.description,
@@ -181,7 +232,7 @@ class EventBus:
                 parent_id=task_id,
                 acceptance_criteria=st.acceptance_criteria,
                 priority=parent.priority,
-                depends_on=([prev_child_id] if prev_child_id else []),
+                depends_on=deps,
                 created_by="pm_agent",
                 history=[
                     TaskEvent(
@@ -323,7 +374,19 @@ class EventBus:
 
         # Git commit (best-effort — don't block dispatch)
         try:
-            commit_hash = self.git_ops.commit_changes(f"legatus: {task.title} ({task.id})")
+            if task.branch_name:
+                worktree_path = os.path.join(
+                    self.settings.agent.worktree_base if self.settings else "/workspace-worktrees",
+                    f"task-{task.id}",
+                )
+                commit_hash = self.git_ops.commit_in_worktree(
+                    worktree_path,
+                    f"legatus: {task.title} ({task.id})",
+                )
+            else:
+                commit_hash = self.git_ops.commit_changes(
+                    f"legatus: {task.title} ({task.id})",
+                )
             if commit_hash:
                 logger.info("Git commit: %s", commit_hash)
         except Exception:
@@ -533,6 +596,17 @@ class EventBus:
                     desc_lines.append(f"- [{f.severity}] {f.category} ({f.file}): {f.description}")
                 desc_lines.append("")
 
+            desc_lines.append("**Next steps:**")
+            desc_lines.append(
+                "- **Approve** to accept the code as-is and"
+                " continue the campaign."
+            )
+            desc_lines.append(
+                "- **Reject** to abandon this task."
+                " The campaign will be marked as failed."
+            )
+            desc_lines.append("")
+
             await self.checkpoint_manager.create(
                 task_id=task.id,
                 title=f"Review failed: {task.title}",
@@ -622,9 +696,19 @@ class EventBus:
 
         # Git commit test files (best-effort — QA writes tests)
         try:
-            commit_hash = self.git_ops.commit_changes(
-                f"legatus: QA tests for {task.title} ({task.id})"
-            )
+            if task.branch_name:
+                worktree_path = os.path.join(
+                    self.settings.agent.worktree_base if self.settings else "/workspace-worktrees",
+                    f"task-{task.id}",
+                )
+                commit_hash = self.git_ops.commit_in_worktree(
+                    worktree_path,
+                    f"legatus: QA tests for {task.title} ({task.id})",
+                )
+            else:
+                commit_hash = self.git_ops.commit_changes(
+                    f"legatus: QA tests for {task.title} ({task.id})",
+                )
             if commit_hash:
                 logger.info("QA git commit: %s", commit_hash)
         except Exception:
@@ -730,6 +814,17 @@ class EventBus:
                 desc_lines.append(qa_result.failure_details[:500])
                 desc_lines.append("")
 
+            desc_lines.append("**Next steps:**")
+            desc_lines.append(
+                "- **Approve** to accept the code as-is and"
+                " continue the campaign."
+            )
+            desc_lines.append(
+                "- **Reject** to abandon this task."
+                " The campaign will be marked as failed."
+            )
+            desc_lines.append("")
+
             await self.checkpoint_manager.create(
                 task_id=task.id,
                 title=f"QA failed: {task.title}",
@@ -744,11 +839,19 @@ class EventBus:
     async def _handle_subtask_done(self, task: Task) -> None:
         """Shared helper called after a sub-task reaches DONE.
 
-        If the task has a parent, calls the dispatcher to check
-        whether more sub-tasks remain or the campaign is done.
+        If the task has a branch (parallel mode), merges the
+        branch into the working branch and cleans up the worktree
+        before dispatching the next tasks.
         """
         if not task.parent_id:
             return
+
+        # Parallel mode: merge the task's branch into the working branch
+        if task.branch_name:
+            merged = await self._merge_and_cleanup(task)
+            if not merged:
+                # Merge conflict — checkpoint created, campaign paused
+                return
 
         result = await self.dispatcher.on_subtask_complete(
             task.parent_id,
@@ -756,13 +859,134 @@ class EventBus:
         if result == "all_done":
             await self._on_campaign_done(task.parent_id)
 
+    async def _merge_and_cleanup(self, task: Task) -> bool:
+        """Merge a completed task's branch into the working branch.
+
+        Returns True if the merge succeeded (or was a no-op),
+        False if there was a conflict (checkpoint created).
+        """
+        worktree_base = (
+            self.settings.agent.worktree_base
+            if self.settings
+            else "/workspace-worktrees"
+        )
+        worktree_path = os.path.join(worktree_base, f"task-{task.id}")
+
+        try:
+            merge_result = self.git_ops.merge_branch(
+                task.branch_name,
+                f"merge: {task.title} ({task.id})",
+            )
+        except Exception:
+            logger.exception(
+                "Merge failed for task %s branch %s",
+                task.id, task.branch_name,
+            )
+            # Remove worktree directory but keep the branch so the
+            # work isn't lost and can be recovered manually.
+            import contextlib
+
+            with contextlib.suppress(Exception):
+                self.git_ops.remove_worktree(worktree_path)
+            return True
+
+        if merge_result.success:
+            logger.info(
+                "Merged branch %s for task %s: %s",
+                task.branch_name, task.id, merge_result.commit_hash,
+            )
+            self._cleanup_worktree(worktree_path, task.branch_name)
+            return True
+
+        # Merge conflict
+        if merge_result.conflict_files:
+            # Auto-resolve if all conflicts are on generated artifacts
+            if _can_auto_resolve(merge_result.conflict_files):
+                try:
+                    self.git_ops.resolve_conflicts_theirs(
+                        merge_result.conflict_files,
+                    )
+                    self.git_ops.commit_merge_resolution(
+                        f"merge (auto-resolved): {task.title} ({task.id})",
+                    )
+                    logger.info(
+                        "Auto-resolved %d conflict(s) for task %s: %s",
+                        len(merge_result.conflict_files),
+                        task.id,
+                        merge_result.conflict_files,
+                    )
+                    self._cleanup_worktree(worktree_path, task.branch_name)
+                    return True
+                except Exception:
+                    logger.exception(
+                        "Auto-resolve failed for task %s, escalating",
+                        task.id,
+                    )
+                    self.git_ops.abort_merge()
+
+            # Real conflicts (or auto-resolve failed) — abort and
+            # create checkpoint for user resolution
+            else:
+                self.git_ops.abort_merge()
+
+            conflict_list = "\n".join(
+                f"- `{f}`" for f in merge_result.conflict_files
+            )
+            desc = (
+                f"Merge conflict when integrating '{task.title}'"
+                f" (branch `{task.branch_name}`).\n\n"
+                f"**Conflicted files:**\n{conflict_list}\n\n"
+                "Resolve the conflicts in `/workspace` (the working"
+                " branch), then approve this checkpoint to continue."
+            )
+
+            await self.checkpoint_manager.create(
+                task_id=task.id,
+                title=f"Merge conflict: {task.title}",
+                description=desc,
+                source_role="merge_conflict",
+            )
+            logger.warning(
+                "Merge conflict for task %s, checkpoint created",
+                task.id,
+            )
+            return False
+
+        # Non-conflict merge failure — keep the branch for recovery
+        logger.error(
+            "Merge failed for task %s (no conflicts detected)."
+            " Branch %s preserved for manual recovery.",
+            task.id, task.branch_name,
+        )
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            self.git_ops.remove_worktree(worktree_path)
+        return True
+
+    def _cleanup_worktree(
+        self, worktree_path: str, branch_name: str,
+    ) -> None:
+        """Remove worktree and delete the task branch (best-effort)."""
+        try:
+            self.git_ops.remove_worktree(worktree_path)
+        except Exception:
+            logger.exception(
+                "Failed to remove worktree at %s", worktree_path,
+            )
+        try:
+            self.git_ops.delete_branch(branch_name)
+        except Exception:
+            logger.exception(
+                "Failed to delete branch %s", branch_name,
+            )
+
     async def _on_campaign_done(self, parent_id: str) -> None:
         """Called when all sub-tasks for a campaign are finished.
 
-        If per-campaign review is enabled, spawns a reviewer on
-        the parent task with aggregated dev outputs. If per-campaign
-        QA is enabled (without reviewer), spawns QA on the parent.
-        Otherwise, marks the parent as done directly.
+        Merges the campaign working branch back to the original
+        branch (if parallel mode was used), then routes to
+        per-campaign review/QA or marks the parent as done.
         """
         reviewer_enabled = self.settings.agent.reviewer_enabled if self.settings else False
         review_mode = self.settings.agent.review_mode if self.settings else ReviewMode.PER_SUBTASK
@@ -772,6 +996,11 @@ class EventBus:
         parent = await self.task_store.get(parent_id)
         if parent is None:
             return
+
+        # Merge campaign branch back to the original branch so that
+        # per-campaign review/QA (and the user) see the final state
+        # on the original branch rather than a detached campaign branch.
+        await self._finalize_campaign_branch(parent)
 
         if reviewer_enabled and review_mode == ReviewMode.PER_CAMPAIGN:
             # Aggregate child dev outputs into parent
@@ -816,6 +1045,47 @@ class EventBus:
                 event_detail="all sub-tasks done",
             )
 
+    async def _finalize_campaign_branch(self, parent: Task) -> None:
+        """Merge the campaign working branch back to the original branch.
+
+        Called after all sub-tasks have been merged into the campaign
+        branch.  Checks out the original branch, merges the campaign
+        branch in, and cleans up.  No-ops when parallel mode was not
+        used (no ``_original_branch`` stored on the parent).
+        """
+        original_branch = parent.agent_outputs.get("_original_branch")
+        if not original_branch:
+            return
+
+        campaign_branch = f"legatus/campaign-{parent.id}"
+        try:
+            self.git_ops.checkout(original_branch)
+            merge_result = self.git_ops.merge_branch(
+                campaign_branch,
+                f"legatus: campaign {parent.title} ({parent.id})",
+            )
+            if merge_result.success:
+                self.git_ops.delete_branch(campaign_branch)
+                logger.info(
+                    "Campaign %s merged to %s",
+                    parent.id, original_branch,
+                )
+            else:
+                logger.error(
+                    "Failed to merge campaign %s to %s: conflicts=%s",
+                    parent.id,
+                    original_branch,
+                    merge_result.conflict_files,
+                )
+                if merge_result.conflict_files:
+                    self.git_ops.abort_merge()
+                # Leave both branches for manual resolution
+        except Exception:
+            logger.exception(
+                "Failed to merge campaign %s to %s",
+                parent.id, original_branch,
+            )
+
     async def _aggregate_child_outputs(
         self,
         parent: Task,
@@ -835,23 +1105,71 @@ class EventBus:
         error = msg.data.get("error", "Unknown error")
         await self.task_manager.on_task_failed(msg.task_id, error)
 
-        # If this was a sub-task, fail the parent too
+        # Clean up worktree if this was a parallel task
         task = await self.task_store.get(msg.task_id)
+        if task and task.branch_name:
+            worktree_base = (
+                self.settings.agent.worktree_base
+                if self.settings
+                else "/workspace-worktrees"
+            )
+            worktree_path = os.path.join(
+                worktree_base, f"task-{task.id}",
+            )
+            self._cleanup_worktree(worktree_path, task.branch_name)
+
+        # If this was a sub-task, create a checkpoint so the user
+        # can see the error and decide how to proceed.
         if task and task.parent_id:
             parent = await self.task_store.get(task.parent_id)
             if parent and parent.status == TaskStatus.ACTIVE:
-                await self.task_store.update_status(
-                    parent.id,
-                    TaskStatus.REVIEW,
-                    event_by="orchestrator",
-                    event_detail=(f"sub-task {task.id} failed: {error}"),
-                )
-                await self.task_store.update_status(
-                    parent.id,
-                    TaskStatus.REJECTED,
-                    event_by="orchestrator",
-                    event_detail=f"sub-task failure: {error}",
-                )
+                error_short = error[:500]
+                desc_lines = [
+                    f"Agent failed for task '{task.title}'.",
+                    "",
+                    f"**Error**: {error_short}",
+                    "",
+                    "**Next steps:**",
+                    "- **Approve** to skip this task and"
+                    " continue the campaign with the"
+                    " remaining tasks.",
+                    "- **Reject** to abandon the campaign.",
+                    "",
+                ]
+                try:
+                    await self.checkpoint_manager.create(
+                        task_id=parent.id,
+                        title=f"Agent failed: {task.title}",
+                        description="\n".join(desc_lines),
+                        source_role="agent_failed",
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to create checkpoint for agent"
+                        " failure on task %s, failing parent",
+                        task.id,
+                    )
+                    # Fallback: cascade failure directly
+                    # (parent might already be BLOCKED if
+                    #  checkpoint partially succeeded)
+                    parent = await self.task_store.get(
+                        task.parent_id,
+                    )
+                    if parent and parent.status == TaskStatus.ACTIVE:
+                        await self.task_store.update_status(
+                            parent.id,
+                            TaskStatus.REVIEW,
+                            event_by="orchestrator",
+                            event_detail=(
+                                f"sub-task {task.id} failed: {error}"
+                            ),
+                        )
+                        await self.task_store.update_status(
+                            parent.id,
+                            TaskStatus.REJECTED,
+                            event_by="orchestrator",
+                            event_detail=f"sub-task failure: {error}",
+                        )
 
         if msg.agent_id:
             await self._cleanup_agent(msg.agent_id)
@@ -864,6 +1182,7 @@ class EventBus:
         """Hook called when a checkpoint is approved.
 
         Routes based on source_role:
+        - merge_conflict → commit resolution, cleanup, dispatch
         - PM checkpoint + architect enabled → spawn Architect
         - Reviewer checkpoint → check QA, then DONE
         - QA checkpoint → TESTING → DONE, handle subtask
@@ -871,6 +1190,39 @@ class EventBus:
         """
         task = await self.task_store.get(task_id)
         if not task:
+            return
+
+        if source_role == "merge_conflict":
+            # User resolved merge conflicts in the workspace.
+            # Commit the resolution, cleanup, and continue dispatching.
+            try:
+                self.git_ops.commit_merge_resolution(
+                    f"merge resolution: {task.title} ({task.id})",
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to commit merge resolution for task %s",
+                    task_id,
+                )
+
+            if task.branch_name:
+                worktree_base = (
+                    self.settings.agent.worktree_base
+                    if self.settings
+                    else "/workspace-worktrees"
+                )
+                worktree_path = os.path.join(
+                    worktree_base, f"task-{task.id}",
+                )
+                self._cleanup_worktree(worktree_path, task.branch_name)
+
+            # Continue dispatching
+            if task.parent_id:
+                result = await self.dispatcher.on_subtask_complete(
+                    task.parent_id,
+                )
+                if result == "all_done":
+                    await self._on_campaign_done(task.parent_id)
             return
 
         if source_role == "qa":
@@ -892,6 +1244,16 @@ class EventBus:
             task = await self.task_store.get(task_id)
             if task:
                 await self._handle_subtask_done(task)
+            return
+
+        if source_role == "agent_failed":
+            # User chose to skip the failed sub-task and continue
+            # the campaign.  The checkpoint was created on the
+            # *parent* task, so task_id IS the parent.
+            # Re-evaluate campaign state now that it's unblocked.
+            result = await self.dispatcher.on_subtask_complete(task_id)
+            if result == "all_done":
+                await self._on_campaign_done(task_id)
             return
 
         if source_role == "reviewer":
@@ -958,10 +1320,61 @@ class EventBus:
                     "Failed to spawn architect for task %s, proceeding to dispatch",
                     task_id,
                 )
-                await self.dispatcher.dispatch_next(task_id)
+                await self._dispatch_initial(task_id)
         else:
             # Architect already approved, or disabled — dispatch
-            await self.dispatcher.dispatch_next(task_id)
+            await self._dispatch_initial(task_id)
+
+    async def _dispatch_initial(self, parent_id: str) -> None:
+        """Dispatch the first batch of sub-tasks for a campaign.
+
+        In parallel mode, creates a working branch and dispatches
+        all ready tasks. In sequential mode, dispatches the first task.
+        """
+        parallel = (
+            self.settings.agent.parallel_enabled
+            if self.settings else False
+        )
+
+        if parallel:
+            # Save the original branch so we can merge back after
+            # the campaign completes.
+            try:
+                original_branch = self.git_ops.get_current_branch()
+                parent = await self.task_store.get(parent_id)
+                if parent:
+                    parent.agent_outputs["_original_branch"] = original_branch
+                    await self.task_store.update(parent)
+            except Exception:
+                logger.exception(
+                    "Failed to save original branch for campaign %s",
+                    parent_id,
+                )
+
+            # Create working branch before dispatching
+            branch_name = f"legatus/campaign-{parent_id}"
+            try:
+                self.git_ops.ensure_working_branch(branch_name)
+            except Exception:
+                logger.exception(
+                    "Failed to create working branch for campaign %s",
+                    parent_id,
+                )
+
+            try:
+                count = await self.dispatcher.dispatch_all_ready(parent_id)
+            except Exception:
+                logger.exception(
+                    "dispatch_all_ready failed for campaign %s",
+                    parent_id,
+                )
+                count = 0
+            logger.info(
+                "Parallel dispatch: %d tasks for campaign %s",
+                count, parent_id,
+            )
+        else:
+            await self.dispatcher.dispatch_next(parent_id)
 
     async def on_checkpoint_rejected(
         self,
@@ -971,6 +1384,7 @@ class EventBus:
         """Hook called when a checkpoint is rejected.
 
         Routes based on source_role:
+        - merge_conflict → abort merge, fail subtask/parent
         - QA checkpoint → ACTIVE → TESTING → REJECTED,
           fail parent if applicable
         - Reviewer checkpoint → ACTIVE → REVIEW → REJECTED,
@@ -979,6 +1393,28 @@ class EventBus:
         """
         task = await self.task_store.get(task_id)
         if task is None:
+            return
+
+        if source_role == "merge_conflict":
+            # User rejected the merge conflict resolution
+            self.git_ops.abort_merge()
+
+            if task.branch_name:
+                worktree_base = (
+                    self.settings.agent.worktree_base
+                    if self.settings
+                    else "/workspace-worktrees"
+                )
+                worktree_path = os.path.join(
+                    worktree_base, f"task-{task.id}",
+                )
+                self._cleanup_worktree(worktree_path, task.branch_name)
+
+            # Let the dispatcher re-evaluate parent state
+            if task.parent_id:
+                await self.dispatcher.on_subtask_complete(
+                    task.parent_id,
+                )
             return
 
         if source_role == "qa":
@@ -1013,6 +1449,24 @@ class EventBus:
                         event_by="orchestrator",
                         event_detail="sub-task QA failure",
                     )
+            return
+
+        if source_role == "agent_failed":
+            # User rejected — abandon the campaign.
+            # The checkpoint was on the parent, so task_id IS
+            # the parent.  Transition ACTIVE → REVIEW → REJECTED.
+            await self.task_store.update_status(
+                task_id,
+                TaskStatus.REVIEW,
+                event_by="user",
+                event_detail="agent failure checkpoint rejected",
+            )
+            await self.task_store.update_status(
+                task_id,
+                TaskStatus.REJECTED,
+                event_by="user",
+                event_detail="campaign abandoned after agent failure",
+            )
             return
 
         if source_role == "reviewer":

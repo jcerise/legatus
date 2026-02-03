@@ -40,6 +40,9 @@ class AgentConfig(BaseModel):
     qa_enabled: bool = False
     qa_mode: QAMode = QAMode.PER_SUBTASK
     qa_max_retries: int = 1
+    parallel_enabled: bool = False
+    host_worktree_base: str = ""
+    worktree_base: str = "/workspace-worktrees"
 
 
 class LegatusSettings(BaseSettings):

@@ -45,6 +45,16 @@ async def lifespan(app: FastAPI):
     git_ops = GitOps(settings.workspace_path)
     git_ops.init_repo()
 
+    # Ensure worktree base directory exists (for parallel mode)
+    if settings.agent.parallel_enabled:
+        import os
+
+        os.makedirs(settings.agent.worktree_base, exist_ok=True)
+        logger.info(
+            "Parallel mode enabled, worktree base: %s",
+            settings.agent.worktree_base,
+        )
+
     # Store shared state
     task_store = TaskStore(redis)
     state_store = StateStore(redis)

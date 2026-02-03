@@ -52,9 +52,23 @@ class AgentSpawner:
             "PROJECT_ID": task.project or "",
         }
 
-        # Use host_workspace_path for Docker volume mount (must be a host path,
-        # not the container-internal path). Falls back to workspace_path if unset.
+        # Pass parallel flag so the PM prompt can adjust
+        if self.settings.agent.parallel_enabled:
+            environment["PARALLEL_ENABLED"] = "1"
+
+        # Determine workspace mount: use task worktree if available,
+        # otherwise fall back to the main workspace.
         host_path = self.settings.agent.host_workspace_path or self.settings.workspace_path
+
+        if (
+            task.branch_name
+            and self.settings.agent.host_worktree_base
+        ):
+            # Mount the task-specific worktree instead of main workspace
+            host_path = (
+                f"{self.settings.agent.host_worktree_base}/task-{task.id}"
+            )
+
         volumes = {
             host_path: {
                 "bind": "/workspace",
