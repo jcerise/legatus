@@ -542,9 +542,165 @@ def build_qa_prompt(task: Task, memory_context: str) -> str:
     return "\n".join(parts)
 
 
+def build_docs_prompt(task: Task, memory_context: str) -> str:
+    """Construct the prompt for a docs (librarius) agent."""
+    parts = [
+        "# Role: Documentation Engineer (librarius)",
+        "",
+        "You are the Docs agent in a multi-agent software"
+        " engineering system. Your job is to examine the"
+        " workspace after a campaign completes and produce"
+        " or update documentation for the changes made.",
+        "",
+        "## Campaign Overview",
+        f"**Title**: {task.title}",
+        "",
+        task.description,
+        "",
+    ]
+
+    # Include aggregated dev outputs
+    dev_output = task.agent_outputs.get("dev", "")
+    if dev_output:
+        parts.append("## Dev Agent Outputs")
+        parts.append(dev_output)
+        parts.append("")
+
+    if memory_context:
+        parts.append("## Relevant Context from Memory")
+        parts.append(memory_context)
+        parts.append("")
+
+    parts.extend(
+        [
+            "## Instructions",
+            "",
+            "1. **Examine the workspace** at /workspace to understand what changed.",
+            "",
+            "2. **Run `git log --oneline -20`** to see recent commits from the campaign.",
+            "",
+            "3. **Update or create documentation**:",
+            "   - Update the project README if new features, commands, or config"
+            " options were added",
+            "   - Add or update API documentation for new public endpoints",
+            "   - Add docstrings for new public functions/classes that lack them",
+            "   - Do NOT over-document: only document what is new or changed",
+            "",
+            "4. **Output your results** as a JSON block in the format"
+            " below. You MUST include this JSON block in your"
+            " response, wrapped in ```json``` fences:",
+            "",
+            "```json",
+            "{",
+            '  "files_updated": ["path/to/file1", "path/to/file2"],',
+            '  "summary": "Brief summary of documentation changes"',
+            "}",
+            "```",
+            "",
+            "## Guidelines",
+            "- Keep documentation concise and accurate.",
+            "- Match the existing documentation style.",
+            "- Only document what the campaign changed."
+            " Don't rewrite unrelated docs.",
+            "- You have full read-write access to the workspace.",
+        ]
+    )
+
+    return "\n".join(parts)
+
+
+def build_pm_acceptance_prompt(task: Task, memory_context: str) -> str:
+    """Construct the prompt for a PM acceptance review."""
+    parts = [
+        "# Role: Product Manager — Acceptance Review",
+        "",
+        "You are a PM agent performing a final acceptance review"
+        " of a completed campaign. Your job is to compare the"
+        " delivered work against the original acceptance criteria"
+        " and determine whether the campaign meets the requirements.",
+        "",
+        "## Original Campaign",
+        f"**Title**: {task.title}",
+        "",
+        task.description,
+        "",
+    ]
+
+    if task.acceptance_criteria:
+        parts.append("## Acceptance Criteria")
+        for criterion in task.acceptance_criteria:
+            parts.append(f"- {criterion}")
+        parts.append("")
+
+    # Include aggregated child outputs
+    dev_output = task.agent_outputs.get("dev", "")
+    if dev_output:
+        parts.append("## Dev Agent Outputs")
+        parts.append(dev_output)
+        parts.append("")
+
+    reviewer_output = task.agent_outputs.get("reviewer", "")
+    if reviewer_output:
+        parts.append("## Reviewer Output")
+        parts.append(reviewer_output)
+        parts.append("")
+
+    qa_output = task.agent_outputs.get("qa", "")
+    if qa_output:
+        parts.append("## QA Output")
+        parts.append(qa_output)
+        parts.append("")
+
+    if memory_context:
+        parts.append("## Relevant Context from Memory")
+        parts.append(memory_context)
+        parts.append("")
+
+    parts.extend(
+        [
+            "## Instructions",
+            "",
+            "1. **Examine the workspace** at /workspace to see the final state.",
+            "",
+            "2. **Review each acceptance criterion** against the delivered work.",
+            "",
+            "3. **Output your verdict** as a JSON block in the format"
+            " below. You MUST include this JSON block in your"
+            " response, wrapped in ```json``` fences:",
+            "",
+            "```json",
+            "{",
+            '  "verdict": "accept" or "reject",',
+            '  "summary": "Brief summary of the acceptance review",',
+            '  "criteria_results": [',
+            "    {",
+            '      "criterion": "The acceptance criterion text",',
+            '      "met": true or false,',
+            '      "notes": "Explanation of how/why this criterion was met or not"',
+            "    }",
+            "  ],",
+            '  "feedback": "Specific feedback for the dev team if rejecting"',
+            "}",
+            "```",
+            "",
+            "## Guidelines",
+            '- Use verdict `"accept"` if all critical criteria are met.',
+            '- Use verdict `"reject"` if any critical criterion is unmet.',
+            "- Be specific in your feedback — devs need to know exactly"
+            " what to fix.",
+            "- Do NOT modify any files. You are reviewing only.",
+        ]
+    )
+
+    return "\n".join(parts)
+
+
 def build_prompt(task: Task, memory_context: str, role: str) -> str:
     """Dispatch to the appropriate prompt builder based on role."""
     if role == "pm":
+        pm_mode = os.environ.get("PM_MODE", "")
+        if pm_mode == "acceptance":
+            return build_pm_acceptance_prompt(task, memory_context)
         parallel = os.environ.get("PARALLEL_ENABLED", "") == "1"
         return build_pm_prompt(task, memory_context, parallel_enabled=parallel)
     if role == "architect":
@@ -553,6 +709,8 @@ def build_prompt(task: Task, memory_context: str, role: str) -> str:
         return build_reviewer_prompt(task, memory_context)
     if role == "qa":
         return build_qa_prompt(task, memory_context)
+    if role == "docs":
+        return build_docs_prompt(task, memory_context)
     return build_dev_prompt(task, memory_context)
 
 
@@ -593,15 +751,18 @@ async def run_agent() -> None:
         # 2. Inject memories
         project_id = os.environ.get("PROJECT_ID") or task_id[:8]
         memory_bridge = MemoryBridge(mem0, project_id)
-        context = await memory_bridge.get_context(task)
+        if agent_role == "reviewer":
+            context = await memory_bridge.get_reviewer_context(task)
+        else:
+            context = await memory_bridge.get_context(task)
 
         # 3. Build prompt (role-aware)
         prompt = build_prompt(task, context, role=agent_role)
         logger.info("Prompt length: %d chars", len(prompt))
 
         # 4. Execute Claude Code
-        timeout = int(os.environ.get("AGENT_TIMEOUT", "600"))
-        max_turns = int(os.environ.get("AGENT_MAX_TURNS", "50"))
+        timeout = int(os.environ.get("AGENT_TIMEOUT", "1800"))
+        max_turns = int(os.environ.get("AGENT_MAX_TURNS", "200"))
         executor = Executor(
             workspace=workspace,
             timeout=timeout,
@@ -612,8 +773,8 @@ async def run_agent() -> None:
         # 5. Report result
         if result["success"]:
             await reporter.report_complete(result)
-            # 6. Extract memories (dev agents only — PM/architect don't write code)
-            if agent_role not in ("pm", "architect", "reviewer", "qa"):
+            # 6. Extract memories (agents that write code)
+            if agent_role not in ("pm", "architect", "reviewer"):
                 await memory_bridge.extract_learnings(task, result)
             logger.info("Task %s completed successfully", task_id)
         else:

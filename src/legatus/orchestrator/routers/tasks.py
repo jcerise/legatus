@@ -85,6 +85,21 @@ async def list_tasks(
     return await task_store.list_all()
 
 
+@router.get("/history/")
+async def task_history(
+    limit: int = 20,
+    task_store: TaskStore = Depends(get_task_store),
+) -> list[Task]:
+    """Return completed/rejected tasks sorted by updated_at desc."""
+    all_tasks = await task_store.list_all()
+    finished = [
+        t for t in all_tasks
+        if t.status in (TaskStatus.DONE, TaskStatus.REJECTED)
+    ]
+    finished.sort(key=lambda t: t.updated_at, reverse=True)
+    return finished[:limit]
+
+
 @router.get("/{task_id}", response_model=Task)
 async def get_task(
     task_id: str,

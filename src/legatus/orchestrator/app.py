@@ -8,8 +8,11 @@ from legatus.memory.client import Mem0Client
 from legatus.models.config import LegatusSettings
 from legatus.orchestrator.routers.agents import router as agents_router
 from legatus.orchestrator.routers.checkpoints import router as checkpoints_router
+from legatus.orchestrator.routers.costs import router as costs_router
 from legatus.orchestrator.routers.health import router as health_router
 from legatus.orchestrator.routers.logs import router as logs_router
+from legatus.orchestrator.routers.memory import router as memory_router
+from legatus.orchestrator.routers.system import router as system_router
 from legatus.orchestrator.routers.tasks import router as tasks_router
 from legatus.orchestrator.services.agent_spawner import AgentSpawner
 from legatus.orchestrator.services.event_bus import EventBus
@@ -105,6 +108,9 @@ def create_app() -> FastAPI:
     app.include_router(agents_router)
     app.include_router(checkpoints_router)
     app.include_router(logs_router)
+    app.include_router(costs_router)
+    app.include_router(memory_router)
+    app.include_router(system_router)
     app.add_websocket_route("/ws", websocket_endpoint)
 
     return app

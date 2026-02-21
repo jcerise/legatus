@@ -29,8 +29,8 @@ class OrchestratorConfig(BaseModel):
 
 class AgentConfig(BaseModel):
     image: str = "legatus-agent:latest"
-    timeout: int = 600
-    max_turns: int = 50
+    timeout: int = 1800
+    max_turns: int = 200
     network: str = "legatus_default"
     host_workspace_path: str = ""
     architect_review: bool = True
@@ -43,6 +43,8 @@ class AgentConfig(BaseModel):
     parallel_enabled: bool = False
     host_worktree_base: str = ""
     worktree_base: str = "/workspace-worktrees"
+    docs_enabled: bool = False
+    pm_acceptance_enabled: bool = False
 
 
 class LegatusSettings(BaseSettings):

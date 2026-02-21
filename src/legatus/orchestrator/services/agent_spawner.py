@@ -30,10 +30,17 @@ class AgentSpawner:
         timeout = self.settings.agent.timeout
         max_turns = self.settings.agent.max_turns
 
-        # PM, Architect, and Reviewer agents get tighter limits — they plan/review, not code
-        if role in (AgentRole.PM, AgentRole.ARCHITECT, AgentRole.REVIEWER):
+        # Planning and review agents get tighter limits — they analyse,
+        # not build, so 5 min / 30 turns is plenty.
+        if role in (AgentRole.PM, AgentRole.ARCHITECT, AgentRole.REVIEWER, AgentRole.DOCS):
             timeout = min(timeout, 300)
             max_turns = min(max_turns, 30)
+
+        # QA agents need time to write and run tests, but not as much
+        # headroom as dev agents.
+        if role == AgentRole.QA:
+            timeout = min(timeout, 900)
+            max_turns = min(max_turns, 100)
 
         environment = {
             "TASK_ID": task.id,
@@ -55,6 +62,10 @@ class AgentSpawner:
         # Pass parallel flag so the PM prompt can adjust
         if self.settings.agent.parallel_enabled:
             environment["PARALLEL_ENABLED"] = "1"
+
+        # PM acceptance mode marker
+        if task.agent_outputs.get("_pm_mode") == "acceptance":
+            environment["PM_MODE"] = "acceptance"
 
         # Determine workspace mount: use task worktree if available,
         # otherwise fall back to the main workspace.

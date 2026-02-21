@@ -16,6 +16,7 @@ from legatus.orchestrator.services.architect_parser import (
 from legatus.orchestrator.services.checkpoint_manager import (
     CheckpointManager,
 )
+from legatus.orchestrator.services.docs_parser import parse_docs_output
 from legatus.orchestrator.services.git_ops import GitOps
 from legatus.orchestrator.services.pm_parser import parse_pm_output
 from legatus.orchestrator.services.qa_parser import (
@@ -29,6 +30,7 @@ from legatus.orchestrator.services.reviewer_parser import (
 from legatus.orchestrator.services.task_dispatcher import TaskDispatcher
 from legatus.orchestrator.services.task_manager import TaskManager
 from legatus.redis_client.client import RedisClient
+from legatus.redis_client.cost_store import CostStore
 from legatus.redis_client.pubsub import PubSubManager
 from legatus.redis_client.state import StateStore
 from legatus.redis_client.task_store import TaskStore
@@ -91,6 +93,7 @@ class EventBus:
             redis_client,
             task_store,
         )
+        self.cost_store = CostStore(redis_client)
         self.dispatcher = TaskDispatcher(
             task_store,
             state_store,
@@ -161,15 +164,35 @@ class EventBus:
         )
         agent_role = agent_info.role if agent_info else AgentRole.DEV
 
+        # Record cost if present
+        cost = msg.data.get("cost")
+        if cost is not None:
+            try:
+                cost_val = float(cost) if not isinstance(cost, (int, float)) else cost
+                task = await self.task_store.get(msg.task_id)
+                project_id = task.project if task else None
+                await self.cost_store.record(
+                    msg.task_id, agent_role.value, cost_val, project_id,
+                )
+            except Exception:
+                logger.debug("Failed to record cost for task %s", msg.task_id, exc_info=True)
+
         match agent_role:
             case AgentRole.PM:
-                await self._on_pm_complete(msg)
+                # Check if this is a PM acceptance review
+                task = await self.task_store.get(msg.task_id) if msg.task_id else None
+                if task and task.agent_outputs.get("_pm_mode") == "acceptance":
+                    await self._on_pm_acceptance_complete(msg)
+                else:
+                    await self._on_pm_complete(msg)
             case AgentRole.ARCHITECT:
                 await self._on_architect_complete(msg)
             case AgentRole.REVIEWER:
                 await self._on_reviewer_complete(msg)
             case AgentRole.QA:
                 await self._on_qa_complete(msg)
+            case AgentRole.DOCS:
+                await self._on_docs_complete(msg)
             case _:
                 await self._on_dev_complete(msg)
 
@@ -519,7 +542,15 @@ class EventBus:
             )
             return
 
-        # No QA — original path: REVIEW → DONE
+        # No QA — route to docs (campaign parent) or DONE
+        docs_enabled = self.settings.agent.docs_enabled if self.settings else False
+        if docs_enabled and not task.parent_id:
+            task = await self.task_store.get(task.id)
+            if task:
+                await self._spawn_docs(task)
+            return
+
+        # REVIEW → DONE
         await self.task_store.update_status(
             task.id,
             TaskStatus.DONE,
@@ -727,7 +758,17 @@ class EventBus:
 
     async def _qa_approve(self, task: Task) -> None:
         """QA passed: TESTING → DONE, then handle subtask
-        completion."""
+        completion or route to docs."""
+        docs_enabled = self.settings.agent.docs_enabled if self.settings else False
+
+        # Campaign-level QA passes: route to docs if enabled
+        if docs_enabled and not task.parent_id:
+            logger.info("QA passed for task %s, routing to docs", task.id)
+            task = await self.task_store.get(task.id)
+            if task:
+                await self._spawn_docs(task)
+            return
+
         await self.task_store.update_status(
             task.id,
             TaskStatus.DONE,
@@ -986,12 +1027,13 @@ class EventBus:
 
         Merges the campaign working branch back to the original
         branch (if parallel mode was used), then routes to
-        per-campaign review/QA or marks the parent as done.
+        per-campaign review/QA, docs, PM acceptance, or marks done.
         """
         reviewer_enabled = self.settings.agent.reviewer_enabled if self.settings else False
         review_mode = self.settings.agent.review_mode if self.settings else ReviewMode.PER_SUBTASK
         qa_enabled = self.settings.agent.qa_enabled if self.settings else False
         qa_mode = self.settings.agent.qa_mode if self.settings else QAMode.PER_SUBTASK
+        docs_enabled = self.settings.agent.docs_enabled if self.settings else False
 
         parent = await self.task_store.get(parent_id)
         if parent is None:
@@ -1030,20 +1072,48 @@ class EventBus:
                 event_detail="all sub-tasks done, campaign QA",
             )
             await self._spawn_qa(parent)
+        elif docs_enabled:
+            # Route to docs agent before marking done
+            aggregated = await self._aggregate_child_outputs(parent)
+            parent.agent_outputs["dev"] = aggregated
+            await self.task_store.update(parent)
+            await self._spawn_docs(parent)
         else:
-            # No campaign review or QA — complete the parent
+            # No campaign review, QA, or docs — complete or PM acceptance
+            await self._finalize_campaign(parent)
+
+    async def _transition_to_done(
+        self, task: Task, detail: str,
+    ) -> None:
+        """Walk through valid state transitions to reach DONE.
+
+        Handles tasks that may be in ACTIVE, REVIEW, or TESTING.
+        """
+        current = task.status
+        if current == TaskStatus.DONE:
+            return
+        if current == TaskStatus.ACTIVE:
             await self.task_store.update_status(
-                parent_id,
-                TaskStatus.REVIEW,
-                event_by="orchestrator",
-                event_detail="all sub-tasks completed",
+                task.id, TaskStatus.REVIEW,
+                event_by="orchestrator", event_detail=detail,
             )
+            current = TaskStatus.REVIEW
+        if current in (TaskStatus.REVIEW, TaskStatus.TESTING):
             await self.task_store.update_status(
-                parent_id,
-                TaskStatus.DONE,
-                event_by="orchestrator",
-                event_detail="all sub-tasks done",
+                task.id, TaskStatus.DONE,
+                event_by="orchestrator", event_detail=detail,
             )
+
+    async def _finalize_campaign(self, parent: Task) -> None:
+        """Complete a campaign: check PM acceptance, then mark done."""
+        pm_acceptance = (
+            self.settings.agent.pm_acceptance_enabled
+            if self.settings else False
+        )
+        if pm_acceptance:
+            await self._spawn_pm_acceptance(parent)
+        else:
+            await self._transition_to_done(parent, "all sub-tasks done")
 
     async def _finalize_campaign_branch(self, parent: Task) -> None:
         """Merge the campaign working branch back to the original branch.
@@ -1244,6 +1314,22 @@ class EventBus:
             task = await self.task_store.get(task_id)
             if task:
                 await self._handle_subtask_done(task)
+            return
+
+        if source_role == "pm_acceptance":
+            # PM acceptance checkpoint approved — mark done
+            await self.task_store.update_status(
+                task_id,
+                TaskStatus.REVIEW,
+                event_by="user",
+                event_detail="PM acceptance checkpoint approved",
+            )
+            await self.task_store.update_status(
+                task_id,
+                TaskStatus.DONE,
+                event_by="user",
+                event_detail="approved after PM acceptance",
+            )
             return
 
         if source_role == "agent_failed":
@@ -1451,6 +1537,22 @@ class EventBus:
                     )
             return
 
+        if source_role == "pm_acceptance":
+            # PM acceptance rejected — ACTIVE → REVIEW → REJECTED
+            await self.task_store.update_status(
+                task_id,
+                TaskStatus.REVIEW,
+                event_by="user",
+                event_detail="PM acceptance rejected",
+            )
+            await self.task_store.update_status(
+                task_id,
+                TaskStatus.REJECTED,
+                event_by="user",
+                event_detail="campaign rejected by PM acceptance",
+            )
+            return
+
         if source_role == "agent_failed":
             # User rejected — abandon the campaign.
             # The checkpoint was on the parent, so task_id IS
@@ -1524,6 +1626,217 @@ class EventBus:
                 event_by="user",
                 event_detail=detail,
             )
+
+    # --------------------------------------------------
+    # Docs (librarius) methods
+    # --------------------------------------------------
+
+    async def _spawn_docs(self, task: Task) -> None:
+        """Spawn a docs agent for the given task."""
+        try:
+            agent_info = self.spawner.spawn_agent(
+                task,
+                AgentRole.DOCS,
+            )
+            await self.state_store.set_agent_info(agent_info)
+            logger.info(
+                "Spawned docs agent %s for task %s",
+                agent_info.id,
+                task.id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to spawn docs for task %s, skipping docs",
+                task.id,
+            )
+            await self._after_docs(task)
+
+    async def _on_docs_complete(self, msg: Message) -> None:
+        """Handle docs agent completion: parse output, git commit doc files."""
+        task_id = msg.task_id
+        output = msg.data.get("output", "")
+
+        task = await self.task_store.get(task_id)
+        if task is None:
+            return
+
+        # Store docs output
+        task.agent_outputs["docs"] = output
+        await self.task_store.update(task)
+
+        # Parse docs output (best-effort)
+        docs_result = parse_docs_output(output)
+        if docs_result:
+            logger.info(
+                "Docs agent updated %d files for task %s: %s",
+                len(docs_result.files_updated),
+                task_id,
+                docs_result.summary,
+            )
+
+        # Git commit doc files (best-effort)
+        try:
+            commit_hash = self.git_ops.commit_changes(
+                f"legatus: docs for {task.title} ({task.id})",
+            )
+            if commit_hash:
+                logger.info("Docs git commit: %s", commit_hash)
+        except Exception:
+            logger.exception(
+                "Git commit failed for docs on task %s",
+                task_id,
+            )
+
+        await self._after_docs(task)
+
+    async def _after_docs(self, task: Task) -> None:
+        """Route to PM acceptance or mark done after docs."""
+        pm_acceptance = (
+            self.settings.agent.pm_acceptance_enabled
+            if self.settings else False
+        )
+        if pm_acceptance:
+            # Re-fetch to get latest state
+            task = await self.task_store.get(task.id)
+            if task:
+                await self._spawn_pm_acceptance(task)
+        else:
+            # Walk through valid states to DONE
+            task = await self.task_store.get(task.id)
+            if task:
+                await self._transition_to_done(task, "docs complete")
+
+    # --------------------------------------------------
+    # PM Acceptance methods
+    # --------------------------------------------------
+
+    async def _spawn_pm_acceptance(self, task: Task) -> None:
+        """Spawn PM in acceptance mode for final validation."""
+        # Aggregate outputs if not already done
+        if not task.agent_outputs.get("dev"):
+            aggregated = await self._aggregate_child_outputs(task)
+            task.agent_outputs["dev"] = aggregated
+
+        # Mark task for acceptance mode
+        task.agent_outputs["_pm_mode"] = "acceptance"
+        await self.task_store.update(task)
+
+        try:
+            # Pass PM_MODE=acceptance to the container
+            agent_info = self.spawner.spawn_agent(
+                task,
+                AgentRole.PM,
+            )
+            await self.state_store.set_agent_info(agent_info)
+            logger.info(
+                "Spawned PM acceptance agent %s for task %s",
+                agent_info.id,
+                task.id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to spawn PM acceptance for task %s, marking done",
+                task.id,
+            )
+            # Clean up the marker
+            task.agent_outputs.pop("_pm_mode", None)
+            await self.task_store.update(task)
+            await self.task_store.update_status(
+                task.id,
+                TaskStatus.REVIEW,
+                event_by="orchestrator",
+                event_detail="PM acceptance spawn failed",
+            )
+            await self.task_store.update_status(
+                task.id,
+                TaskStatus.DONE,
+                event_by="orchestrator",
+                event_detail="campaign complete (PM acceptance skipped)",
+            )
+
+    async def _on_pm_acceptance_complete(self, msg: Message) -> None:
+        """Handle PM acceptance agent completion."""
+        from legatus.orchestrator.services.pm_acceptance_parser import (
+            parse_pm_acceptance_output,
+        )
+
+        task_id = msg.task_id
+        output = msg.data.get("output", "")
+
+        task = await self.task_store.get(task_id)
+        if task is None:
+            return
+
+        # Clean up the mode marker
+        task.agent_outputs.pop("_pm_mode", None)
+        task.agent_outputs["pm_acceptance"] = output
+        await self.task_store.update(task)
+
+        result = parse_pm_acceptance_output(output)
+
+        if result is None or result.verdict == "accept":
+            # Accepted — mark done
+            await self.task_store.update_status(
+                task_id,
+                TaskStatus.REVIEW,
+                event_by="pm_acceptance",
+                event_detail="PM accepted: " + (result.summary if result else "auto-accept"),
+            )
+            await self.task_store.update_status(
+                task_id,
+                TaskStatus.DONE,
+                event_by="pm_acceptance",
+                event_detail="PM acceptance passed",
+            )
+            logger.info("PM accepted campaign %s", task_id)
+        else:
+            # Rejected — create checkpoint with feedback
+            desc_lines = [
+                f"PM acceptance review rejected '{task.title}'.",
+                "",
+                f"**Summary**: {result.summary}",
+                "",
+            ]
+            if result.criteria_results:
+                desc_lines.append("**Criteria Results:**")
+                for cr in result.criteria_results:
+                    status_icon = "pass" if cr.get("met") else "FAIL"
+                    desc_lines.append(
+                        f"- [{status_icon}] {cr.get('criterion', '?')}: {cr.get('notes', '')}"
+                    )
+                desc_lines.append("")
+
+            if result.feedback:
+                desc_lines.append("**Feedback:**")
+                desc_lines.append(result.feedback)
+                desc_lines.append("")
+
+            await self.checkpoint_manager.create(
+                task_id=task_id,
+                title=f"PM acceptance rejected: {task.title}",
+                description="\n".join(desc_lines),
+                source_role="pm_acceptance",
+            )
+            logger.info(
+                "PM rejected campaign %s, checkpoint created",
+                task_id,
+            )
+
+    async def resume_dispatch(self) -> None:
+        """Called after resuming from pause to catch up on queued work.
+
+        Iterates all ACTIVE parent tasks and re-evaluates their
+        subtask state, dispatching any ready tasks.
+        """
+        all_tasks = await self.task_store.list_all()
+        for task in all_tasks:
+            if task.status != TaskStatus.ACTIVE:
+                continue
+            if not task.subtask_ids:
+                continue
+            result = await self.dispatcher.on_subtask_complete(task.id)
+            if result == "all_done":
+                await self._on_campaign_done(task.id)
 
     async def _update_agent_status(self, msg: Message) -> None:
         """Update agent status based on incoming events."""

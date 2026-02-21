@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 class Executor:
     """Wraps Claude Code CLI invocation."""
 
-    def __init__(self, workspace: str, timeout: int = 600, max_turns: int = 50):
+    def __init__(self, workspace: str, timeout: int = 1800, max_turns: int = 200):
         self.workspace = workspace
         self.timeout = timeout
         self.max_turns = max_turns

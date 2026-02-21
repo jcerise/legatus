@@ -27,3 +27,5 @@ workspace/
 node_modules/
 
 uv.lock
+phase-3-plan.md
+web-ui-plan.md

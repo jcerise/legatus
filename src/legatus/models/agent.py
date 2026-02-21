@@ -10,6 +10,7 @@ class AgentRole(StrEnum):
     ARCHITECT = "architect"
     REVIEWER = "reviewer"
     QA = "qa"
+    DOCS = "docs"
 
 
 class AgentStatus(StrEnum):

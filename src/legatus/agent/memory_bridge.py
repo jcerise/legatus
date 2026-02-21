@@ -50,6 +50,29 @@ class MemoryBridge:
 
         return "\n\n".join(sections)
 
+    async def get_reviewer_context(self, task: Task) -> str:
+        """Query Mem0 for standard context plus coding standards for reviewers."""
+        base_context = await self.get_context(task)
+        sections: list[str] = [base_context] if base_context else []
+
+        try:
+            project_ns = MemoryNamespace.project(self.project_id)
+            standards = await self.mem0.search(
+                query="coding standards conventions style rules",
+                **project_ns,
+                limit=10,
+            )
+            if standards:
+                lines = [m.get("memory", str(m)) for m in standards]
+                sections.append(
+                    "### Project Coding Standards\n"
+                    + "\n".join(f"- {line}" for line in lines)
+                )
+        except Exception:
+            logger.debug("No coding standards memories found", exc_info=True)
+
+        return "\n\n".join(sections)
+
     async def extract_learnings(self, task: Task, result: dict) -> None:
         """After task completion, parse structured learnings and store them."""
         output = result.get("output", "")

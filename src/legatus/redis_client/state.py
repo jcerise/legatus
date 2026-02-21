@@ -57,3 +57,17 @@ class StateStore:
         r = self._redis.client
         raw = await r.lrange(self.LOG_KEY, 0, limit - 1)
         return [json.loads(entry) for entry in raw]
+
+    PAUSED_KEY = "system:paused"
+
+    async def set_paused(self, paused: bool) -> None:
+        r = self._redis.client
+        if paused:
+            await r.set(self.PAUSED_KEY, "1")
+        else:
+            await r.delete(self.PAUSED_KEY)
+
+    async def is_paused(self) -> bool:
+        r = self._redis.client
+        val = await r.get(self.PAUSED_KEY)
+        return val == "1" or val == b"1"

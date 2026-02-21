@@ -28,8 +28,20 @@ def render_status_panel(
     agents: list[dict],
     recent_logs: list[dict],
     checkpoints: list[dict] | None = None,
+    paused: bool = False,
 ) -> None:
     """Render the full status display with Rich panels and tables."""
+    if paused:
+        console.print(
+            Panel(
+                "[bold yellow]PAUSED[/bold yellow] — dispatch is suspended. "
+                "Running agents will finish but no new tasks will be dispatched.\n"
+                "Run [bold]legion resume[/bold] to restart.",
+                border_style="yellow",
+            )
+        )
+        console.print()
+
     # Pending checkpoints (show prominently at the top)
     if checkpoints:
         for cp in checkpoints:
@@ -52,6 +64,8 @@ def render_status_panel(
                 role_badge = "[bold red][Merge][/bold red] "
             elif source == "agent_failed":
                 role_badge = "[bold red][Agent][/bold red] "
+            elif source == "pm_acceptance":
+                role_badge = "[bold blue][PM Accept][/bold blue] "
 
             # Build checkpoint content
             lines = [
@@ -190,11 +204,69 @@ def render_status_panel(
             console.print(f"{prefix} {msg}")
 
 
+def render_history_table(
+    console: Console,
+    tasks: list[dict],
+) -> None:
+    """Render a table of completed/rejected tasks."""
+    if not tasks:
+        console.print("[dim]No finished tasks yet.[/dim]")
+        return
+
+    table = Table(title="Task History", show_header=True, title_style="bold")
+    table.add_column("ID", style="cyan")
+    table.add_column("Title", max_width=40)
+    table.add_column("Status")
+    table.add_column("Duration", style="dim")
+    table.add_column("Outcome")
+
+    for task in tasks:
+        status = task.get("status", "?")
+        icon = STATUS_ICONS.get(status, "[ ]")
+        title = (task.get("title") or "")[:40]
+
+        # Compute duration from created_at to updated_at
+        duration = ""
+        created = task.get("created_at", "")
+        updated = task.get("updated_at", "")
+        if created and updated:
+            try:
+                from datetime import datetime
+
+                c = datetime.fromisoformat(created)
+                u = datetime.fromisoformat(updated)
+                delta = u - c
+                secs = int(delta.total_seconds())
+                if secs >= 3600:
+                    duration = f"{secs // 3600}h {(secs % 3600) // 60}m"
+                elif secs >= 60:
+                    duration = f"{secs // 60}m {secs % 60}s"
+                else:
+                    duration = f"{secs}s"
+            except Exception:
+                pass
+
+        # Outcome: last meaningful history event detail
+        outcome = ""
+        history = task.get("history", [])
+        for entry in reversed(history):
+            detail = entry.get("detail", "")
+            if detail:
+                outcome = detail[:60]
+                break
+
+        status_str = f"{icon} {status}"
+        table.add_row(task.get("id", "?"), title, status_str, duration, outcome)
+
+    console.print(table)
+
+
 _SOURCE_LABELS = {
     "reviewer": "Reviewer",
     "qa": "QA",
     "merge_conflict": "Merge conflict",
     "agent_failed": "Agent crashed",
+    "pm_acceptance": "PM Acceptance",
 }
 
 

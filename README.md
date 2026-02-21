@@ -2,7 +2,7 @@
 
 A command-and-control system for software engineering agents. Legatus deploys autonomous AI agents as ephemeral operatives, coordinated through a central command structure, to execute engineering campaigns against your codebase.
 
-In the Roman legion, the *legatus legionis* commanded thousands from a single seat of authority. This system operates on the same principle: one orchestrator dispatches agents, tracks their campaigns, and consolidates their conquests into your repository. A *praefectus* (PM agent) surveys the terrain and decomposes orders into tactical objectives. The *praefectus castrorum* (Architect agent) then reviews the battle plan and issues design edicts -- fortification specifications, supply line definitions, and structural doctrine -- before any ground is broken. Only once the commander approves both the strategy and the engineering plan are the *milites* (dev agents) dispatched to execute each objective -- sequentially by default, or in parallel across isolated git worktrees when the legion is marshalled for concurrent operations. After each operative completes their work, the *optio* (Reviewer agent) inspects the results -- flagging defects for rework and escalating security concerns to the commander. Finally, the *tesserarius* (QA agent) writes and runs tests against the completed work, sending failed objectives back through the ranks before the campaign advances.
+In the Roman legion, the *legatus legionis* commanded thousands from a single seat of authority. This system operates on the same principle: one orchestrator dispatches agents, tracks their campaigns, and consolidates their conquests into your repository. A *praefectus* (PM agent) surveys the terrain and decomposes orders into tactical objectives. The *praefectus castrorum* (Architect agent) then reviews the battle plan and issues design edicts -- fortification specifications, supply line definitions, and structural doctrine -- before any ground is broken. Only once the commander approves both the strategy and the engineering plan are the *milites* (dev agents) dispatched to execute each objective -- sequentially by default, or in parallel across isolated git worktrees when the legion is marshalled for concurrent operations. After each operative completes their work, the *optio* (Reviewer agent) inspects the results -- flagging defects for rework and escalating security concerns to the commander. The *tesserarius* (QA agent) writes and runs tests against the completed work, sending failed objectives back through the ranks before the campaign advances. Once all objectives pass, the *librarius* (Docs agent) updates documentation to reflect the new conquests. Finally, the *praefectus* returns to conduct an acceptance review, verifying that the delivered work satisfies the original campaign objectives before the campaign is declared complete.
 
 ## Architecture
 
@@ -24,6 +24,7 @@ In the Roman legion, the *legatus legionis* commanded thousands from a single se
 - **Dev Agents (*milites*)** -- Ephemeral Docker containers, each running Claude Code against the workspace. Deployed on command, destroyed on completion. In sequential mode, each operative works on the shared workspace in turn. In parallel mode, each is assigned an isolated git worktree -- the orchestrator manages branch creation, merges, and conflict resolution as each operative reports back. Guided by the Architect's doctrine
 - **Reviewer Agent (*optio*)** -- Inspects each operative's work after completion. Reviews code changes for correctness, security, style, and performance. Rejects substandard work back to the dev agent for a second attempt, and escalates security concerns directly to the commander via checkpoint. Configurable per-subtask or per-campaign
 - **QA Agent (*tesserarius*)** -- Writes and runs tests against completed work. Examines the workspace, identifies the test framework, and produces test suites that verify acceptance criteria. Failed tests send the objective back to the dev agent with detailed failure reports. If the operative fails a second time, the *tesserarius* escalates to the commander. Configurable per-subtask or per-campaign, independent of the *optio*
+- **Docs Agent (*librarius*)** -- Generates and updates documentation after a campaign completes. Examines the workspace, reads recent commits, and produces or updates README files, API docs, and docstrings for new public APIs. Enabled via `LEGATUS_AGENT__DOCS_ENABLED=true`
 - **Redis** -- State store and courier system. Task records, agent status, and pub/sub messaging between all components
 - **Mem0** -- Long-term intelligence. Agents store and retrieve institutional knowledge across campaigns
 - **CLI (`legion`)** -- Your interface to issue orders and observe the field. Task status displays show dependency chains, failure context, and the source of any blockage -- reviewer rejections, QA failures, merge conflicts, or agent crashes
@@ -73,6 +74,21 @@ legion logs --follow
 # Rule on the praefectus' battle plan or the architect's design edicts
 legion approve
 legion reject <checkpoint-id> "Consolidate the flanks"
+
+# Campaign intelligence
+legion cost                        # API cost breakdown by role
+legion history                     # Completed and rejected tasks
+legion history --limit 50
+
+# Memory management
+legion memory show                 # List project and global memories
+legion memory search "auth"        # Search memories by similarity
+legion memory forget <memory-id>   # Delete a memory
+legion memory export               # Dump all memories as JSON
+
+# Dispatch control
+legion pause                       # Stop dispatching new tasks
+legion resume                      # Resume dispatch and catch up
 ```
 
 ## Standing Orders
@@ -128,6 +144,13 @@ Campaign order
      |                    sends failures back through the full chain,
      |                    escalates to the commander after one retry
      v
+ librarius (Docs) -----> generates/updates documentation for the
+     |                    campaign's changes (README, API docs, docstrings)
+     v
+ praefectus (PM acceptance) -----> validates delivered work against
+     |                              original acceptance criteria;
+     |                              checkpoint on rejection
+     v
  Campaign complete
 ```
 
@@ -136,6 +159,10 @@ The `--direct` flag bypasses both the *praefectus* and the *praefectus castrorum
 The *tesserarius* is enabled independently (`LEGATUS_AGENT__QA_ENABLED=true`) and slots after the *optio* in the chain. When both are active, each objective passes through review then testing before the campaign advances. The *tesserarius* also operates in `per_subtask` (default) or `per_campaign` mode (`LEGATUS_AGENT__QA_MODE=per_campaign`). On test failure, the objective is sent back to the operative for one retry -- the full chain (review, then QA) runs again since the code has changed. A second failure escalates to the commander with test results and failure details.
 
 Parallel operations are enabled with `LEGATUS_AGENT__PARALLEL_ENABLED=true`. When marshalled for concurrent execution, the *praefectus* specifies dependency chains between objectives, and the orchestrator creates a campaign working branch (`legatus/campaign-{id}`) from the current HEAD. Each operative receives its own git worktree branched from the campaign branch. As objectives complete, the orchestrator merges each branch back. Conflicts on generated artifacts (`.coverage`, `*.pyc`, cache directories) are auto-resolved by accepting the incoming version. Real source conflicts cause the campaign to halt with a merge conflict checkpoint -- the commander resolves the conflict in the workspace, then approves to resume. When all objectives have been merged, the campaign branch is folded back into the original branch.
+
+The *librarius* is enabled with `LEGATUS_AGENT__DOCS_ENABLED=true`. After all review and QA passes complete (whether per-subtask or per-campaign), the Docs agent examines the workspace, reads recent commits, and updates or creates documentation. The *librarius* gets tighter resource limits (300s, 30 turns) -- it reads and writes docs, not code.
+
+PM acceptance review is enabled with `LEGATUS_AGENT__PM_ACCEPTANCE_ENABLED=true`. After the docs step (or directly after review/QA if docs is disabled), the *praefectus* re-enters in acceptance mode to validate the delivered work against the original campaign objectives and acceptance criteria. If the criteria are met, the campaign is marked complete. If the *praefectus* rejects, a checkpoint is created with per-criterion results and feedback. The commander can approve the checkpoint to accept the work as-is, or reject to fail the campaign.
 
 When an operative crashes or an agent container fails, the orchestrator creates a checkpoint on the parent campaign with error context and next steps. The commander can approve to skip the failed objective and continue the campaign with remaining tasks, or reject to abandon the campaign entirely. All failure states -- reviewer rejections, QA failures, merge conflicts, and agent crashes -- surface in `legion status` with the source of the blockage and the reason for failure.
 
@@ -154,6 +181,10 @@ When an operative crashes or an agent container fails, the orchestrator creates 
 **Phase 3** -- the legion can now march on multiple fronts. When parallel operations are enabled, the *praefectus* declares dependency chains between objectives, and multiple operatives deploy simultaneously into isolated git worktrees. The orchestrator manages branch creation, merges each branch as it completes, and auto-resolves conflicts on generated artifacts. Real source conflicts halt the campaign with a merge conflict checkpoint for the commander. Once every objective has been integrated, the campaign branch is merged back to the original branch.
 
 **Phase 3.1** -- the field situation is now visible from the command post. Agent failures, reviewer rejections, QA failures, and merge conflicts all create checkpoints with error context, source attribution, and guidance on how to proceed. `legion status` shows why each task is blocked or rejected, and who blocked it. The commander can approve to continue past a failure or reject to abandon the campaign -- no more silent casualties.
+
+**Phase 2.7** -- the *librarius* has been assigned to the staff. After all review and QA passes, the Docs agent examines the workspace and updates documentation to reflect the campaign's changes. The *optio* now enforces project coding standards from long-term memory during reviews. API cost tracking, memory management, task history, and dispatch pause/resume are available as field commands.
+
+**Phase 2.8** -- the *praefectus* now conducts acceptance reviews. After the *librarius* (or after QA if docs are disabled), the PM re-enters to compare the delivered work against the original acceptance criteria. Unmet criteria produce a checkpoint with per-criterion results and feedback for the commander to approve or reject.
 
 The following campaigns remain:
 

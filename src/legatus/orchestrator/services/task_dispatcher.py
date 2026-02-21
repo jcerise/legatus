@@ -69,6 +69,10 @@ class TaskDispatcher:
 
         Returns True if a sub-task was dispatched, False otherwise.
         """
+        if await self.state_store.is_paused():
+            logger.info("Dispatch paused, skipping dispatch_next for %s", parent_id)
+            return False
+
         parent = await self.task_store.get(parent_id)
         if parent is None:
             logger.error("Parent task %s not found", parent_id)
@@ -155,6 +159,10 @@ class TaskDispatcher:
         Creates a git worktree for each task before spawning
         its dev agent. Returns the number of tasks dispatched.
         """
+        if await self.state_store.is_paused():
+            logger.info("Dispatch paused, skipping dispatch_all_ready for %s", parent_id)
+            return 0
+
         parent = await self.task_store.get(parent_id)
         if parent is None:
             logger.error("Parent task %s not found", parent_id)
@@ -292,6 +300,9 @@ class TaskDispatcher:
 
         Returns True if the agent was spawned successfully.
         """
+        if await self.state_store.is_paused():
+            logger.info("Dispatch paused, skipping dispatch_single for %s", task.id)
+            return False
         # Inject architect context if parent has it
         if task.parent_id:
             parent = await self.task_store.get(task.parent_id)
