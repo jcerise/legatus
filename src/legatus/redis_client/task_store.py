@@ -76,6 +76,12 @@ class TaskStore:
         )
         return await self.update(task)
 
+    async def delete(self, task_id: str) -> None:
+        """Remove a task from Redis entirely."""
+        r = self._redis.client
+        await r.delete(self._key(task_id))
+        await r.zrem(self.INDEX_KEY, task_id)
+
     async def get_by_status(self, status: TaskStatus) -> list[Task]:
         all_tasks = await self.list_all()
         return [t for t in all_tasks if t.status == status]

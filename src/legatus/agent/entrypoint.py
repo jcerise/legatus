@@ -119,13 +119,46 @@ def build_pm_prompt(
         ]
     )
 
+    # Decomposition guidance — shared across parallel and sequential modes
+    decomp_guidance = [
+        "## Decomposition Principles",
+        "",
+        "Each sub-task will be executed by a **separate dev agent** in an"
+        " isolated context. The agent has no knowledge of other sub-tasks"
+        " beyond what you write in the description. This means:",
+        "",
+        "- **Granularity matters**: Break work into small, focused units."
+        "  A sub-task should represent roughly one logical change —"
+        "  a single module, a single API endpoint, a single UI component,"
+        "  or a single configuration layer. If a sub-task touches more"
+        "  than 3-4 files, it should probably be split further.",
+        "",
+        "- **Be specific, not vague**: Bad: 'Implement the backend'."
+        "  Good: 'Create the TodoItem Pydantic model in src/models/todo.py"
+        "  with fields: id, title, description, completed, created_at'.",
+        "",
+        "- **Each sub-task must be self-contained**: Include enough detail"
+        "  that the dev agent can implement it without guessing."
+        "  Specify file paths, function signatures, data shapes,"
+        "  and expected behavior.",
+        "",
+        "- **Aim for 5-15 sub-tasks** for a typical feature. A simple"
+        "  feature might need 5, a complex one might need 15+."
+        "  Prefer more, smaller tasks over fewer, larger ones."
+        "  Each should complete in under 10 minutes of agent work.",
+        "",
+        "- **Separate concerns**: Data models, business logic, API"
+        "  endpoints, configuration, and integration should be"
+        "  separate sub-tasks, not lumped together.",
+        "",
+    ]
+
     if parallel_enabled:
+        parts.extend(decomp_guidance)
         parts.extend(
             [
-                "2. **Decompose the feature** into 2-7 sub-tasks that can"
-                " execute **in parallel** where dependencies allow."
-                " Each sub-task should be a self-contained unit of work"
-                " that a dev agent can implement independently.",
+                "2. **Decompose the feature** into sub-tasks that can"
+                " execute **in parallel** where dependencies allow.",
                 "",
                 "3. **Use `depends_on`** to declare ordering constraints."
                 " `depends_on` is an array of 0-based indices referencing"
@@ -145,8 +178,8 @@ def build_pm_prompt(
                 "    {",
                 '      "title": "Short title for the sub-task",',
                 '      "description": "Detailed implementation instructions'
-                " for the dev agent. Include file paths and function names"
-                ' when possible.",',
+                " for the dev agent. Include file paths, function signatures,"
+                ' and data shapes when possible.",',
                 '      "acceptance_criteria": ["Criterion 1", "Criterion 2"],',
                 '      "estimated_complexity": "low|medium|high",',
                 '      "depends_on": []',
@@ -167,19 +200,18 @@ def build_pm_prompt(
                 " truly needs another task's output (files, APIs, etc.).",
                 "- Each sub-task description should be detailed enough for a"
                 " dev agent to implement without additional context.",
-                "- Include file paths and function names when you can identify"
-                " them from the workspace.",
+                "- Include file paths and function signatures when you can"
+                " identify them from the workspace.",
                 "- If a sub-task depends on files created by a prior sub-task,"
                 " mention that explicitly in the description and in `depends_on`.",
                 "- Do NOT make any file changes. You are planning only.",
-                "- Keep the number of sub-tasks reasonable (2-7). Prefer"
-                " fewer, larger sub-tasks over many tiny ones.",
             ]
         )
     else:
+        parts.extend(decomp_guidance)
         parts.extend(
             [
-                "2. **Decompose the feature** into 2-7 sequential sub-tasks.",
+                "2. **Decompose the feature** into sequential sub-tasks.",
                 "   Each sub-task should be a self-contained unit of work"
                 " that a dev agent can implement independently (given prior"
                 " sub-tasks are complete).",
@@ -198,8 +230,8 @@ def build_pm_prompt(
                 "    {",
                 '      "title": "Short title for the sub-task",',
                 '      "description": "Detailed implementation instructions'
-                " for the dev agent. Include file paths and function names"
-                ' when possible.",',
+                " for the dev agent. Include file paths, function signatures,"
+                ' and data shapes when possible.",',
                 '      "acceptance_criteria": ["Criterion 1", "Criterion 2"],',
                 '      "estimated_complexity": "low|medium|high"',
                 "    }",
@@ -210,13 +242,11 @@ def build_pm_prompt(
                 "## Guidelines",
                 "- Each sub-task description should be detailed enough for a"
                 " dev agent to implement without additional context.",
-                "- Include file paths and function names when you can identify"
-                " them from the workspace.",
+                "- Include file paths and function signatures when you can"
+                " identify them from the workspace.",
                 "- If a sub-task depends on files created by a prior sub-task,"
                 " mention that explicitly in the description.",
                 "- Do NOT make any file changes. You are planning only.",
-                "- Keep the number of sub-tasks reasonable (2-7). Prefer"
-                " fewer, larger sub-tasks over many tiny ones.",
             ]
         )
 
@@ -276,8 +306,18 @@ def build_architect_prompt(task: Task, memory_context: str) -> str:
             " the existing codebase: structure, patterns, frameworks,"
             " and conventions.",
             "",
-            "2. **Review the PM's plan** and assess whether the"
-            " proposed decomposition is architecturally sound.",
+            "2. **Review the PM's task decomposition** and assess:",
+            "   - Are the sub-tasks granular enough? Each sub-task"
+            "     will be handled by a separate dev agent with a"
+            "     time limit. A sub-task that touches more than 3-4"
+            "     files or combines multiple concerns (e.g. data"
+            "     models + API endpoints + configuration) should be"
+            "     split into smaller pieces.",
+            "   - Are the sub-task descriptions specific enough for"
+            "     a dev agent to implement without guessing? They"
+            "     should include file paths, function signatures,"
+            "     data shapes, and expected behavior.",
+            "   - Is the ordering/dependency structure correct?",
             "",
             "3. **Produce design decisions** covering:",
             "   - Module structure and component boundaries",
@@ -286,7 +326,14 @@ def build_architect_prompt(task: Task, memory_context: str) -> str:
             "   - Data models and API contracts",
             "   - Any concerns or risks with the approach",
             "",
-            "4. **Output your design** as a JSON block in the format"
+            "4. **Refine the sub-task list if needed**. You may split"
+            "   overly broad sub-tasks, reorder them, add missing"
+            "   sub-tasks, or add detail to vague descriptions."
+            "   Include the refined list in `refined_subtasks`."
+            "   If the PM's decomposition is already good, set"
+            "   `refined_subtasks` to `null`.",
+            "",
+            "5. **Output your design** as a JSON block in the format"
             " below. You MUST include this JSON block in your"
             " response, wrapped in ```json``` fences:",
             "",
@@ -308,13 +355,26 @@ def build_architect_prompt(task: Task, memory_context: str) -> str:
             '  "concerns": [',
             '    "Any risks, trade-offs, or issues to flag"',
             "  ],",
-            '  "design_notes": "Free-form architectural notes and guidance for dev agents"',
+            '  "design_notes": "Free-form architectural notes and guidance for dev agents",',
+            '  "refined_subtasks": [',
+            "    {",
+            '      "title": "Refined sub-task title",',
+            '      "description": "Detailed implementation instructions with'
+            " file paths, function signatures, data shapes, and expected"
+            ' behavior.",',
+            '      "acceptance_criteria": ["Criterion 1", "Criterion 2"],',
+            '      "estimated_complexity": "low|medium|high"',
+            "    }",
+            "  ]",
             "}",
             "```",
             "",
             "## Guidelines",
             "- Focus on decisions that will guide the dev agents."
             " Be specific about interfaces, data shapes, and patterns.",
+            "- If the PM's decomposition is too coarse, **split tasks**."
+            " A good sub-task should take a dev agent under 10 minutes."
+            " Prefer 5-15 focused sub-tasks over 2-3 broad ones.",
             "- If the PM's decomposition has issues, note them in"
             " your concerns. The user can reject the plan if needed.",
             "- Reference existing code patterns from the workspace when recommending approaches.",
@@ -756,9 +816,28 @@ async def run_agent() -> None:
         else:
             context = await memory_bridge.get_context(task)
 
+        # 2b. Fetch live sibling task status from the task store
+        if task.parent_id:
+            parent = await task_store.get(task.parent_id)
+            if parent and parent.subtask_ids:
+                siblings = []
+                for sid in parent.subtask_ids:
+                    sib = await task_store.get(sid)
+                    if sib:
+                        siblings.append(sib)
+                sibling_ctx = MemoryBridge.format_sibling_context(
+                    task.id, siblings,
+                )
+                if sibling_ctx:
+                    context = f"{context}\n\n{sibling_ctx}" if context else sibling_ctx
+
         # 3. Build prompt (role-aware)
         prompt = build_prompt(task, context, role=agent_role)
         logger.info("Prompt length: %d chars", len(prompt))
+
+        # 3b. Write "starting" entry so sibling agents see our intent
+        if agent_role not in ("pm", "architect", "reviewer"):
+            await memory_bridge.store_campaign_start(task, agent_role)
 
         # 4. Execute Claude Code
         timeout = int(os.environ.get("AGENT_TIMEOUT", "1800"))
@@ -776,6 +855,9 @@ async def run_agent() -> None:
             # 6. Extract memories (agents that write code)
             if agent_role not in ("pm", "architect", "reviewer"):
                 await memory_bridge.extract_learnings(task, result)
+                await memory_bridge.store_campaign_progress(
+                    task, result, agent_role,
+                )
             logger.info("Task %s completed successfully", task_id)
         else:
             await reporter.report_failed(result.get("error", "Unknown error"))

@@ -5,12 +5,15 @@ import os
 
 from fastapi import WebSocket
 
+from legatus.agent.memory_bridge import MemoryBridge
+from legatus.memory.client import Mem0Client
 from legatus.models.agent import AgentRole, AgentStatus
 from legatus.models.config import LegatusSettings, QAMode, ReviewMode
 from legatus.models.messages import Message, MessageType
 from legatus.models.task import Task, TaskEvent, TaskStatus
 from legatus.orchestrator.services.agent_spawner import AgentSpawner
 from legatus.orchestrator.services.architect_parser import (
+    RefinedSubtask,
     parse_architect_output,
 )
 from legatus.orchestrator.services.checkpoint_manager import (
@@ -81,6 +84,7 @@ class EventBus:
         spawner: AgentSpawner,
         redis_client: RedisClient,
         settings: LegatusSettings | None = None,
+        mem0: Mem0Client | None = None,
     ):
         self.task_manager = TaskManager(task_store)
         self.task_store = task_store
@@ -89,6 +93,7 @@ class EventBus:
         self.git_ops = GitOps(workspace_path)
         self.spawner = spawner
         self.settings = settings
+        self.mem0 = mem0
         self.checkpoint_manager = CheckpointManager(
             redis_client,
             task_store,
@@ -311,6 +316,7 @@ class EventBus:
 
     async def _on_architect_complete(self, msg: Message) -> None:
         """Handle Architect agent completion: parse design,
+        optionally replace subtasks with refined versions,
         store output, create checkpoint for user approval."""
         task_id = msg.task_id
         output = msg.data.get("output", "")
@@ -325,6 +331,16 @@ class EventBus:
 
         # Parse output (best-effort — architect is advisory)
         plan = parse_architect_output(output)
+
+        # If the architect refined the subtask list, replace the
+        # PM's original subtasks with the architect's version.
+        original_subtask_count = len(task.subtask_ids)
+        if plan and plan.refined_subtasks:
+            await self._replace_subtasks(task, plan.refined_subtasks)
+            # Re-fetch task after subtask replacement
+            task = await self.task_store.get(task_id)
+            if task is None:
+                return
 
         # Build checkpoint description
         desc_lines = [
@@ -362,6 +378,21 @@ class EventBus:
                 desc_lines.append("**Notes:**")
                 desc_lines.append(plan.design_notes[:500])
                 desc_lines.append("")
+
+            if plan.refined_subtasks:
+                desc_lines.append(
+                    f"**Refined Sub-tasks** ({len(plan.refined_subtasks)}"
+                    f" tasks, replacing PM's original"
+                    f" {original_subtask_count} tasks):"
+                )
+                for i, st in enumerate(plan.refined_subtasks):
+                    desc_lines.append(
+                        f"{i + 1}. **{st.title}** ({st.estimated_complexity})"
+                    )
+                    desc_lines.append(f"   {st.description[:200]}")
+                    for ac in st.acceptance_criteria:
+                        desc_lines.append(f"   - {ac}")
+                    desc_lines.append("")
         else:
             desc_lines.append(
                 "*(Architect output could not be parsed"
@@ -380,6 +411,82 @@ class EventBus:
         logger.info(
             "Architect design for task %s: checkpoint created",
             task_id,
+        )
+
+    async def _replace_subtasks(
+        self,
+        parent: Task,
+        refined: list[RefinedSubtask],
+    ) -> None:
+        """Replace the PM's subtasks with the architect's refined list.
+
+        Deletes all existing PLANNED subtasks and creates new ones
+        from the architect's refined decomposition.
+        """
+        # Delete old subtasks (only those still in PLANNED state)
+        for old_id in list(parent.subtask_ids):
+            old_task = await self.task_store.get(old_id)
+            if old_task and old_task.status == TaskStatus.PLANNED:
+                await self.task_store.delete(old_id)
+
+        # Determine parallel mode
+        parallel = (
+            self.settings.agent.parallel_enabled
+            if self.settings else False
+        )
+
+        # Create new subtasks
+        child_ids: list[str] = []
+        prev_child_id: str | None = None
+        for i, st in enumerate(refined):
+            if parallel:
+                deps = [
+                    child_ids[idx]
+                    for idx in st.depends_on
+                    if idx < len(child_ids)
+                ]
+            else:
+                deps = [prev_child_id] if prev_child_id else []
+
+            child = Task(
+                title=st.title,
+                description=st.description,
+                prompt=st.description,
+                type=parent.type,
+                project=parent.project,
+                parent_id=parent.id,
+                acceptance_criteria=st.acceptance_criteria,
+                priority=parent.priority,
+                depends_on=deps,
+                created_by="architect_agent",
+                history=[
+                    TaskEvent(
+                        event="created",
+                        by="architect_agent",
+                        detail=f"refined sub-task {i + 1}/{len(refined)}",
+                    )
+                ],
+            )
+            child = await self.task_store.create(child)
+            await self.task_store.update_status(
+                child.id,
+                TaskStatus.PLANNED,
+                event_by="architect_agent",
+                event_detail="refined by architect",
+            )
+            child_ids.append(child.id)
+            prev_child_id = child.id
+
+        # Update parent
+        parent.subtask_ids = child_ids
+        await self.task_store.update(parent)
+
+        logger.info(
+            "Architect refined task %s: replaced subtasks"
+            " (%d → %d)",
+            parent.id,
+            len(parent.subtask_ids),
+            len(child_ids),
         )
 
     async def _on_dev_complete(self, msg: Message) -> None:
@@ -1026,8 +1133,9 @@ class EventBus:
         """Called when all sub-tasks for a campaign are finished.
 
         Merges the campaign working branch back to the original
-        branch (if parallel mode was used), then routes to
-        per-campaign review/QA, docs, PM acceptance, or marks done.
+        branch (if parallel mode was used), clears campaign working
+        memory, then routes to per-campaign review/QA, docs, PM
+        acceptance, or marks done.
         """
         reviewer_enabled = self.settings.agent.reviewer_enabled if self.settings else False
         review_mode = self.settings.agent.review_mode if self.settings else ReviewMode.PER_SUBTASK
@@ -1038,6 +1146,9 @@ class EventBus:
         parent = await self.task_store.get(parent_id)
         if parent is None:
             return
+
+        # Clear campaign working memory now that all agents are done
+        await self._clear_campaign_memory(parent)
 
         # Merge campaign branch back to the original branch so that
         # per-campaign review/QA (and the user) see the final state
@@ -1871,6 +1982,14 @@ class EventBus:
                     logs[-2000:],
                 )
         await self.state_store.remove_agent(agent_id)
+
+    async def _clear_campaign_memory(self, parent: Task) -> None:
+        """Clear campaign working memory after all agents finish."""
+        if not self.mem0:
+            return
+        project_id = parent.project or parent.id[:8]
+        bridge = MemoryBridge(self.mem0, project_id)
+        await bridge.clear_campaign_memory(parent.id)
 
     async def _broadcast_to_ws(self, msg: Message) -> None:
         """Forward event to all connected WebSocket clients."""

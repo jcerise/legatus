@@ -9,11 +9,21 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class RefinedSubtask:
+    title: str
+    description: str
+    acceptance_criteria: list[str] = field(default_factory=list)
+    estimated_complexity: str = "medium"
+    depends_on: list[int] = field(default_factory=list)
+
+
+@dataclass
 class ArchitectPlan:
     decisions: list[dict] = field(default_factory=list)
     interfaces: list[dict] = field(default_factory=list)
     concerns: list[str] = field(default_factory=list)
     design_notes: str = ""
+    refined_subtasks: list[RefinedSubtask] | None = None
 
 
 def parse_architect_output(output: str) -> ArchitectPlan | None:
@@ -100,9 +110,34 @@ def _validate_plan(data: dict) -> ArchitectPlan | None:
         )
         return None
 
+    # Parse refined subtasks if provided
+    raw_subtasks = data.get("refined_subtasks")
+    refined_subtasks = None
+    if isinstance(raw_subtasks, list) and raw_subtasks:
+        refined_subtasks = []
+        for st in raw_subtasks:
+            if not isinstance(st, dict):
+                continue
+            title = st.get("title", "")
+            desc = st.get("description", "")
+            if not title or not desc:
+                continue
+            refined_subtasks.append(
+                RefinedSubtask(
+                    title=title,
+                    description=desc,
+                    acceptance_criteria=st.get("acceptance_criteria", []),
+                    estimated_complexity=st.get("estimated_complexity", "medium"),
+                    depends_on=st.get("depends_on", []),
+                )
+            )
+        if not refined_subtasks:
+            refined_subtasks = None
+
     return ArchitectPlan(
         decisions=decisions,
         interfaces=interfaces,
         concerns=concerns,
         design_notes=design_notes,
+        refined_subtasks=refined_subtasks,
     )
