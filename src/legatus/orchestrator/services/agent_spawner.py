@@ -30,9 +30,14 @@ class AgentSpawner:
         timeout = self.settings.agent.timeout
         max_turns = self.settings.agent.max_turns
 
-        # Planning and review agents get tighter limits — they analyse,
-        # not build, so 5 min / 30 turns is plenty.
-        if role in (AgentRole.PM, AgentRole.ARCHITECT, AgentRole.REVIEWER, AgentRole.DOCS):
+        # PM and Architect explore the workspace and produce detailed
+        # plans — they need more headroom than pure review agents.
+        if role in (AgentRole.PM, AgentRole.ARCHITECT):
+            timeout = min(timeout, 900)
+            max_turns = min(max_turns, 100)
+
+        # Review and docs agents are lightweight — they read, not build.
+        if role in (AgentRole.REVIEWER, AgentRole.DOCS):
             timeout = min(timeout, 300)
             max_turns = min(max_turns, 30)
 

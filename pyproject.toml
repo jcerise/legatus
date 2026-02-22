@@ -53,3 +53,8 @@ ignore = ["B008"]  # FastAPI Depends() and Typer Argument/Option in defaults
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.uv.workspace]
+members = [
+    "workspace",
+]
